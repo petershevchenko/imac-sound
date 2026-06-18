@@ -1,3 +1,14 @@
+snd-hda-codec-cs8409-imac (1.10) resolute; urgency=medium
+
+  * Internal speakers, Phase 1. Re-enable the ASP1 speaker pins (0x24/0x25),
+    widen the GPIO mask to include the amp-enable line (GPIO4), and program the
+    four TAS5764 amplifiers (I2C 0xd8/0xda/0xdc/0xde, TDM channels 0/2/1/3) plus
+    the CS8409 ASP1 4-channel TDM transmit path. Adds an unpaged amp-I2C write
+    helper. Speakers are exposed as a manually-selectable output alongside the
+    headphone; amps are programmed/enabled at init.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 18:30:00 +0000
+
 snd-hda-codec-cs8409-imac (1.9) resolute; urgency=medium
 
   * Remove the diagnostic kernel logging (the per-playback "CS42L83

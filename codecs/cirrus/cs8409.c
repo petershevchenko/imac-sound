@@ -311,6 +311,38 @@ error:
 }
 
 /**
+ * cs8409_amp_i2c_write - Write to an unpaged I2C device behind the CS8409
+ * (e.g. the iMac's TAS5764 speaker amps). Unlike cs8409_i2c_write() this is
+ * not tied to a sub_codec and uses an 8-bit register / 8-bit value with no
+ * paging.
+ * @codec: the codec instance
+ * @dev_addr: 8-bit I2C device address (e.g. 0xd8)
+ * @reg: register
+ * @value: data
+ */
+static int cs8409_amp_i2c_write(struct hda_codec *codec, unsigned int dev_addr,
+				unsigned int reg, unsigned int value)
+{
+	struct cs8409_spec *spec = codec->spec;
+	unsigned int i2c_reg_data;
+
+	guard(mutex)(&spec->i2c_mux);
+
+	cs8409_enable_i2c_clock(codec);
+	cs8409_set_i2c_dev_addr(codec, dev_addr);
+
+	i2c_reg_data = ((reg << 8) & 0x0ff00) | (value & 0x0ff);
+	cs8409_vendor_coef_set(codec, CS8409_I2C_QWRITE, i2c_reg_data);
+
+	if (cs8409_i2c_wait_complete(codec) < 0) {
+		codec_err(codec, "amp i2c write failed 0x%02x : 0x%02x\n", dev_addr, reg);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+/**
  * cs8409_i2c_bulk_write - CS8409 I2C Write Sequence.
  * @scodec: the codec instance
  * @seq: Register Sequence to write
@@ -1286,6 +1318,66 @@ static void cs8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned in
 						 AC_UNSOL_RES_TAG);
 }
 
+/* Bring up the internal speakers. The iMac drives 4 speakers via 4 TAS5764
+ * amplifiers on the CS8409 ASP1 4-channel TDM bus (amps at I2C 0xd8/0xda/
+ * 0xdc/0xde reading TDM channels 0/2/1/3). Ported from the macOS AppleHDA
+ * TAS576 setup; per-amp volume 0xcf (0 dB). Phase 1: programmed and enabled
+ * at init (always on); audio reaches the amps whenever the speaker DACs
+ * (nodes 0x02/0x03 -> pins 0x24/0x25) stream.
+ */
+static void cs8409_cs42l83_speaker_setup(struct hda_codec *codec)
+{
+	static const struct { unsigned int reg, val; } amp_reset[] = {
+		{ 0x01, 0xfc }, { 0x02, 0x04 }, { 0x03, 0x80 }, { 0x04, 0xcf },
+		{ 0x06, 0x51 }, { 0x08, 0x00 }, { 0x10, 0xff }, { 0x11, 0xfc },
+		{ 0x13, 0x00 }, { 0x14, 0x02 },
+	};
+	static const unsigned int amp_addr[4] = { 0xd8, 0xda, 0xdc, 0xde };
+	static const unsigned int amp_chan[4] = { 0x00, 0x02, 0x01, 0x03 };
+	unsigned int coef;
+	int a, i;
+
+	/* Reset all four amps. */
+	for (a = 0; a < 4; a++)
+		for (i = 0; i < ARRAY_SIZE(amp_reset); i++)
+			cs8409_amp_i2c_write(codec, amp_addr[a], amp_reset[i].reg,
+					     amp_reset[i].val);
+
+	/* CS8409 ASP1 4-channel TDM transmit path (speaker side), mirroring the
+	 * macOS setupTDMPath for amps 1-2 (ASP1.A) and 3-4 (ASP1.B).
+	 */
+	cs8409_vendor_coef_set(codec, ASP1_A_TX_CTRL1, 0x0800);
+	cs8409_vendor_coef_set(codec, ASP1_A_TX_CTRL2, 0x0820);
+	cs8409_vendor_coef_set(codec, ASP1_B_TX_CTRL1, 0x0840);
+	cs8409_vendor_coef_set(codec, ASP1_B_TX_CTRL2, 0x0860);
+	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL2, 0x08ff);
+	coef = cs8409_vendor_coef_get(codec, CS8409_ASP1_CLK_CTRL1);
+	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL1, coef | 0x8000);
+	coef = cs8409_vendor_coef_get(codec, CS8409_ASP1_CLK_CTRL3);
+	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL3, coef | 0x0001);
+	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG3, 0x0280);
+	coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
+	cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef | 0x5400);
+	coef = cs8409_vendor_coef_get(codec, CS8409_DEV_CFG2);
+	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG2, coef | 0x0020); /* ASP1_EN */
+	cs8409_vendor_coef_set(codec, 0x6b, 0x001f);
+	coef = cs8409_vendor_coef_get(codec, 0x71);
+	cs8409_vendor_coef_set(codec, 0x71, coef | 0x400f);
+	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0, 0x7f0, 0x00b6);
+
+	/* Configure each amp (I2S, TDM channel, gain, fault) and power it on. */
+	for (a = 0; a < 4; a++) {
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x02, 0x44);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x03, 0x80 | amp_chan[a]);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x06, 0x55);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x08, 0x18);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x04, 0xcf);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x13, 0x00);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x02, 0x44);
+		cs8409_amp_i2c_write(codec, amp_addr[a], 0x01, 0xfd); /* amp on */
+	}
+}
+
 /* Vendor-specific HW configuration for the CS42L83 headphone path.
  * Sets up the CS8409 ASP2 TDM transmit path (the Apple part routes headphone
  * audio over ASP2, not ASP1), then resumes the companion CS42L83.
@@ -1341,6 +1433,9 @@ static void cs8409_cs42l83_hw_init(struct hda_codec *codec)
 	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0, 0x7f0, 0x00b6);
 
 	cs42l42_resume(cs42l83);
+
+	/* Bring up the internal-speaker amps on ASP1. */
+	cs8409_cs42l83_speaker_setup(codec);
 
 	/* Enable Unsolicited Response */
 	cs8409_enable_ur(codec, 1);
@@ -1443,13 +1538,12 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 		spec->num_scodecs = 1;
 		spec->scodecs[CS8409_CODEC0]->codec = codec;
 
-		/* The internal-speaker pins (ASP1) come up as association-1 line outs
-		 * and would otherwise become the primary output, stealing the PCM from
-		 * the headphone path. Force them disabled (driver_pins priority) so the
-		 * parser routes playback to the CS42L83 headphone DAC on ASP2.
+		/* Internal speakers on ASP1 (driven by the TAS5764 amps). Keep their
+		 * BIOS internal-speaker pin configs so the parser exposes a Speakers
+		 * output alongside the headphone; the user selects between them.
 		 */
-		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_A, 0x400000f0);
-		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_B, 0x400000f0);
+		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_A, 0x90100110);
+		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_B, 0x90100111);
 
 		/* Make the headphone a no-presence (phantom) jack so it is always
 		 * available to userspace. The reused CS42L42 detection mis-reads the
@@ -1472,7 +1566,8 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 				 CS8409_CS42L83_AMP_PDN;
 		spec->gpio_data = spec->scodecs[CS8409_CODEC0]->reset_gpio |
 				  CS8409_CS42L83_AMP_PDN;
-		spec->gpio_mask = 0x0f;
+		/* GPIO0 IRQ in, GPIO1 CS42L83 reset out, GPIO4 speaker-amp enable out */
+		spec->gpio_mask = 0x1f;
 
 		/* Basic initial sequence for specific hw configuration */
 		snd_hda_sequence_write(codec, cs8409_cs42l83_init_verbs);

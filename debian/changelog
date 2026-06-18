@@ -1,3 +1,11 @@
+snd-hda-codec-cs8409-imac (1.9) resolute; urgency=medium
+
+  * Remove the diagnostic kernel logging (the per-playback "CS42L83
+    play-prepare" line and the init-time "CS42L83 state" line) now that the
+    headphone output and internal mic are working. No functional change.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 17:55:00 +0000
+
 snd-hda-codec-cs8409-imac (1.8) resolute; urgency=medium
 
   * Enable the internal microphone (DMIC2 on pin 0x45 -> ADC 0x23). Add an

@@ -1342,23 +1342,6 @@ static void cs8409_cs42l83_hw_init(struct hda_codec *codec)
 
 	cs42l42_resume(cs42l83);
 
-	/* Diagnostic: report key CS42L83 state after bring-up so we can tell
-	 * whether the companion DAC is powered, PLL-locked and unmuted.
-	 *   PWR1 0x1101: 0xfe = powered up; 0xff = powered down
-	 *   CODEC_STATUS 0x1308: PLL-lock / power-up status bits
-	 *   HP_CTL 0x2001: bits 3:2 = analog A/B mute (want 0)
-	 *   PLL_CTL1 0x1501: 0x01 = PLL enabled
-	 *   ASP_CLK_CFG 0x1207, OSC_SW 0x1107: serial-clock source state
-	 */
-	codec_info(codec,
-		"CS42L83 state: PWR1=0x%02x STATUS=0x%02x HP_CTL=0x%02x PLL=0x%02x ASPCLK=0x%02x OSC=0x%02x\n",
-		cs8409_i2c_read(cs42l83, 0x1101),
-		cs8409_i2c_read(cs42l83, 0x1308),
-		cs8409_i2c_read(cs42l83, 0x2001),
-		cs8409_i2c_read(cs42l83, 0x1501),
-		cs8409_i2c_read(cs42l83, 0x1207),
-		cs8409_i2c_read(cs42l83, 0x1107));
-
 	/* Enable Unsolicited Response */
 	cs8409_enable_ur(codec, 1);
 }
@@ -1404,13 +1387,6 @@ static void cs42l83_playback_pcm_hook(struct hda_pcm_stream *hinfo,
 
 		/* Unmute the headphone (clear analog A/B mute in HP_CTL). */
 		cs8409_i2c_write(cs42l83, CS42L42_HP_CTL, 0x01);
-
-		codec_info(codec,
-			"CS42L83 play-prepare: STATUS=0x%02x PWR1=0x%02x HP_CTL=0x%02x PWRGOOD=0x%02x\n",
-			cs8409_i2c_read(cs42l83, 0x1308),
-			cs8409_i2c_read(cs42l83, 0x1101),
-			cs8409_i2c_read(cs42l83, 0x2001),
-			cs8409_i2c_read(cs42l83, 0x130b));
 		break;
 	case HDA_GEN_PCM_ACT_CLEANUP:
 		spec->playback_started = 0;

@@ -1,3 +1,13 @@
+snd-hda-codec-cs8409-imac (1.6) resolute; urgency=medium
+
+  * Report the headphone jack as always present so PipeWire/WirePlumber keeps a
+    usable output sink instead of falling back to Dummy Output. The reused
+    CS42L42 detection mis-reads the iMac's inverted jack circuit; since the
+    headphone is the only analog output, a fixed-present port is the pragmatic
+    fix. Mic detection is left intact.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 16:45:00 +0000
+
 snd-hda-codec-cs8409-imac (1.5) resolute; urgency=medium
 
   * Power up the CS42L83 headphone output stage at playback. The boot value of

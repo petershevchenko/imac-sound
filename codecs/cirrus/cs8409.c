@@ -1268,16 +1268,22 @@ static void cs8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned in
 	if (res & cs42l83->irq_mask)
 		return;
 
-	if (cs42l42_jack_unsol_event(cs42l83)) {
-		jk = snd_hda_jack_tbl_get_mst(codec, CS8409_CS42L83_HP_PIN_NID, 0);
-		if (jk)
-			snd_hda_jack_unsol_event(codec, (jk->tag << AC_UNSOL_RES_TAG_SHIFT) &
-							AC_UNSOL_RES_TAG);
-		jk = snd_hda_jack_tbl_get_mst(codec, CS8409_CS42L83_AMIC_PIN_NID, 0);
-		if (jk)
-			snd_hda_jack_unsol_event(codec, (jk->tag << AC_UNSOL_RES_TAG_SHIFT) &
-							 AC_UNSOL_RES_TAG);
-	}
+	/* Process detection (keeps the mic state current) but always report the
+	 * headphone as present: the reused CS42L42 detection logic mis-reads the
+	 * iMac's inverted jack-presence circuit, and the headphone is the only
+	 * analog output, so a fixed-present port gives a usable desktop sink.
+	 */
+	cs42l42_jack_unsol_event(cs42l83);
+	cs42l83->hp_jack_in = 1;
+
+	jk = snd_hda_jack_tbl_get_mst(codec, CS8409_CS42L83_HP_PIN_NID, 0);
+	if (jk)
+		snd_hda_jack_unsol_event(codec, (jk->tag << AC_UNSOL_RES_TAG_SHIFT) &
+						AC_UNSOL_RES_TAG);
+	jk = snd_hda_jack_tbl_get_mst(codec, CS8409_CS42L83_AMIC_PIN_NID, 0);
+	if (jk)
+		snd_hda_jack_unsol_event(codec, (jk->tag << AC_UNSOL_RES_TAG_SHIFT) &
+						 AC_UNSOL_RES_TAG);
 }
 
 /* Vendor-specific HW configuration for the CS42L83 headphone path.
@@ -1463,6 +1469,8 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 
 		spec->scodecs[CS8409_CODEC0]->hsbias_hiz = 0x0000;
 		spec->scodecs[CS8409_CODEC0]->full_scale_vol = CS42L42_FULL_SCALE_VOL_0DB;
+		/* Headphone is treated as always present (see jack unsol handler). */
+		spec->scodecs[CS8409_CODEC0]->hp_jack_in = 1;
 		break;
 	case HDA_FIXUP_ACT_PROBE:
 		/* Fix Sample Rate to 44.1kHz */

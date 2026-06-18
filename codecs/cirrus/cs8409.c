@@ -1351,10 +1351,11 @@ static void cs8409_cs42l83_speaker_setup(struct hda_codec *codec)
 	cs8409_vendor_coef_set(codec, ASP1_B_TX_CTRL1, 0x0840);
 	cs8409_vendor_coef_set(codec, ASP1_B_TX_CTRL2, 0x0860);
 	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL2, 0x08ff);
-	coef = cs8409_vendor_coef_get(codec, CS8409_ASP1_CLK_CTRL1);
-	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL1, coef | 0x8000);
-	coef = cs8409_vendor_coef_get(codec, CS8409_ASP1_CLK_CTRL3);
-	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL3, coef | 0x0001);
+	/* These two are wholesale writes in the macOS sequence (LCHI=0, SCDIV);
+	 * keeping stale bits here gives the amps a malformed bit clock.
+	 */
+	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL1, 0x8000);
+	cs8409_vendor_coef_set(codec, CS8409_ASP1_CLK_CTRL3, 0x0001);
 	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG3, 0x0280);
 	coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
 	cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef | 0x5400);

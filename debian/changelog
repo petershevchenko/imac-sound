@@ -1,3 +1,12 @@
+snd-hda-codec-cs8409-imac (1.11) resolute; urgency=medium
+
+  * Speakers: fix the ASP1 bit-clock setup. ASP1_CLK_CTRL1 (coef 0x03) and
+    ASP1_CLK_CTRL3 (coef 0x05) must be written wholesale (0x8000 / 0x0001) as
+    in the macOS sequence; the previous read-OR-modify left stale bits
+    (0x801f / 0x0260), giving the amps a malformed clock.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 18:55:00 +0000
+
 snd-hda-codec-cs8409-imac (1.10) resolute; urgency=medium
 
   * Internal speakers, Phase 1. Re-enable the ASP1 speaker pins (0x24/0x25),

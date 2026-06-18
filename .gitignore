@@ -1,0 +1,18 @@
+# build artifacts
+*.ko
+*.o
+*.o.*
+*.mod
+*.mod.c
+.*.cmd
+*.order
+*.symvers
+.tmp_versions/
+modules.order
+Module.symvers
+# debhelper / dpkg-buildpackage output
+debian/.debhelper/
+debian/snd-hda-codec-cs8409-imac-dkms/
+debian/files
+debian/*.substvars
+debian/debhelper-build-stamp

@@ -1,0 +1,12 @@
+# Automatically added by dh_dkms/3.2.2-1ubuntu1
+DKMS_NAME=snd-hda-codec-cs8409-imac
+DKMS_VERSION=1.5
+
+case "$1" in
+    remove|upgrade|deconfigure)
+      if [  "$(dkms status -m $DKMS_NAME -v $DKMS_VERSION)" ]; then
+         dkms remove -m $DKMS_NAME -v $DKMS_VERSION --all
+      fi
+    ;;
+esac
+# End automatically added section

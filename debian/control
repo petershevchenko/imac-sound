@@ -1,0 +1,17 @@
+Source: snd-hda-codec-cs8409-imac
+Section: kernel
+Priority: optional
+Maintainer: Peter Shev <peter@shev.it>
+Build-Depends: debhelper-compat (= 13), dh-sequence-dkms
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: snd-hda-codec-cs8409-imac-dkms
+Architecture: all
+Depends: ${misc:Depends}
+Description: Cirrus CS8409/CS42L83 HDA codec driver for Apple iMac18,3
+ DKMS module that adds Apple iMac18,3 (2017 27" 5K) audio support to the
+ in-kernel Cirrus Logic CS8409 HDA codec driver. The CS8409 bridges to a
+ CS42L83 companion DAC over I2C; this build adds the Apple quirk, GPIO/ASP2
+ routing and 44.1kHz CS42L83 bring-up needed for the headphone path. It
+ installs into updates/dkms so it overrides the stock in-tree module.

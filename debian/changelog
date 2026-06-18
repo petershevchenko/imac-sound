@@ -1,0 +1,54 @@
+snd-hda-codec-cs8409-imac (1.5) resolute; urgency=medium
+
+  * Power up the CS42L83 headphone output stage at playback. The boot value of
+    PWR_CTL1 (0x1101=0xfe) leaves HP/MIXER/ASP-in powered down; the playback
+    hook now walks it 0xfe -> 0x9e -> 0x96 (ASP_DAI+MIXER on, wait power-good,
+    then HP on), matching the macOS output enable. This was the silence cause.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 16:20:00 +0000
+
+snd-hda-codec-cs8409-imac (1.4) resolute; urgency=medium
+
+  * Re-run the CS42L83 bring-up in the playback PREPARE hook (clocks live) so
+    the companion DAC's PLL locks, mirroring how macOS enables the DAC at
+    playback start. Log STATUS/PLL/OSC at prepare to confirm the lock.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 15:55:00 +0000
+
+snd-hda-codec-cs8409-imac (1.3) resolute; urgency=medium
+
+  * Diagnostic build: log key CS42L83 state (power, codec status, HP_CTL mute,
+    PLL, serial-clock source) after bring-up to isolate why the headphone path
+    is silent despite a correctly configured CS8409 ASP2 transmit path.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 15:30:00 +0000
+
+snd-hda-codec-cs8409-imac (1.2) resolute; urgency=medium
+
+  * Fix the ASP2 headphone clocking: replace the Dell speaker clock-divider
+    values (ASP2_CLK_CTRL1=0x801f, CTRL3=0x805c) with the Apple CS42L83 44.1kHz
+    values (0x8000 / 0x0042) and restore the ASP2 TX-rate writes, faithfully
+    matching the macOS setupTDMPath sequence. Wrong dividers produced silence.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 13:45:00 +0000
+
+snd-hda-codec-cs8409-imac (1.1) resolute; urgency=medium
+
+  * Route playback to the CS42L83 headphone path: force the internal-speaker
+    pins (ASP1, 0x24/0x25) disabled so the parser uses the ASP2 headphone DAC
+    instead of the unconfigured speaker DAC.
+  * Add a CS42L83-specific suspend that avoids the CS42L42 PDN_DONE poll
+    (eliminates the repeated "Timeout waiting for PDN_DONE" messages).
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 11:30:00 +0000
+
+snd-hda-codec-cs8409-imac (1.0) resolute; urgency=medium
+
+  * Initial DKMS package.
+  * Add Apple iMac18,3 (CS8409/CS42L83) support to the in-kernel CS8409 codec:
+    - SND_PCI_QUIRK / model "imac18-3" for subsystem 0x106b1000.
+    - CS42L83 44.1kHz multi-page I2C bring-up sequence.
+    - CS8409 ASP2 headphone TDM path with 44.1kHz clocking.
+    - GPIO mapping (GPIO1 reset, GPIO0 IRQ, GPIO4 amp enable).
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 08:20:00 +0000

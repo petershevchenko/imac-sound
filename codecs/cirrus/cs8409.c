@@ -1421,6 +1421,35 @@ static void cs42l83_playback_pcm_hook(struct hda_pcm_stream *hinfo,
 	}
 }
 
+/* Apple capture hook. The internal microphone is a digital mic on the CS8409's
+ * DMIC2 input (pin 0x45 -> ADC 0x23). The CS8409 only clocks it when the
+ * DMIC2_SCL_EN bit (0x0002) is set in PAD_CFG (coef 0x82); enable it while
+ * capturing so the DMIC produces data, and clear it afterwards.
+ */
+static void cs42l83_capture_pcm_hook(struct hda_pcm_stream *hinfo,
+				     struct hda_codec *codec,
+				     struct snd_pcm_substream *substream,
+				     int action)
+{
+	struct cs8409_spec *spec = codec->spec;
+	unsigned int coef;
+
+	switch (action) {
+	case HDA_GEN_PCM_ACT_PREPARE:
+		spec->capture_started = 1;
+		coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
+		cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef | 0x0002);
+		break;
+	case HDA_GEN_PCM_ACT_CLEANUP:
+		spec->capture_started = 0;
+		coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
+		cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef & ~0x0002);
+		break;
+	default:
+		break;
+	}
+}
+
 void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action)
 {
 	struct cs8409_spec *spec = codec->spec;
@@ -1486,7 +1515,7 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 		spec->gen.stream_analog_capture = &cs42l83_44k1_pcm_analog_capture;
 		/* add hooks */
 		spec->gen.pcm_playback_hook = cs42l83_playback_pcm_hook;
-		spec->gen.pcm_capture_hook = cs42l42_capture_pcm_hook;
+		spec->gen.pcm_capture_hook = cs42l83_capture_pcm_hook;
 		snd_hda_gen_add_kctl(&spec->gen, "Headphone Playback Volume",
 				&cs42l42_dac_volume_mixer);
 		snd_hda_gen_add_kctl(&spec->gen, "Mic Capture Volume",

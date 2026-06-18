@@ -1,3 +1,12 @@
+snd-hda-codec-cs8409-imac (1.8) resolute; urgency=medium
+
+  * Enable the internal microphone (DMIC2 on pin 0x45 -> ADC 0x23). Add an
+    Apple capture hook that sets the DMIC2_SCL_EN bit (0x0002) in PAD_CFG
+    (coef 0x82) while capturing so the CS8409 clocks the digital mic, and
+    clears it afterwards.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 17:35:00 +0000
+
 snd-hda-codec-cs8409-imac (1.7) resolute; urgency=medium
 
   * Make the headphone a no-presence (phantom) jack by setting the NO_PRESENCE

@@ -1446,6 +1446,14 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_A, 0x400000f0);
 		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_B, 0x400000f0);
 
+		/* Make the headphone a no-presence (phantom) jack so it is always
+		 * available to userspace. The reused CS42L42 detection mis-reads the
+		 * iMac's inverted jack circuit, leaving the port "unavailable" and
+		 * PipeWire on a Dummy sink; HP is the only analog output, so set the
+		 * NO_PRESENCE misc bit (0x100) in the HP pin's default config.
+		 */
+		snd_hda_codec_set_pincfg(codec, CS8409_CS42L83_HP_PIN_NID, 0x002b4120);
+
 		spec->gen.suppress_auto_mute = 1;
 		spec->gen.no_primary_hp = 1;
 		spec->gen.suppress_vmaster = 1;

@@ -1,3 +1,13 @@
+snd-hda-codec-cs8409-imac (1.7) resolute; urgency=medium
+
+  * Make the headphone a no-presence (phantom) jack by setting the NO_PRESENCE
+    misc bit in its pin default config (0x002b4020 -> 0x002b4120). The jack now
+    reports always-present, so WirePlumber activates the analog output profile
+    automatically instead of leaving PipeWire on a Dummy sink. Supersedes the
+    1.6 hp_jack_in approach, which didn't reach the ALSA jack control.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 17:05:00 +0000
+
 snd-hda-codec-cs8409-imac (1.6) resolute; urgency=medium
 
   * Report the headphone jack as always present so PipeWire/WirePlumber keeps a

@@ -16,3 +16,5 @@ debian/snd-hda-codec-cs8409-imac-dkms/
 debian/files
 debian/*.substvars
 debian/debhelper-build-stamp
+debian/*.debhelper
+debian/*.debhelper.log

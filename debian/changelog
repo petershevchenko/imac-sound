@@ -1,3 +1,11 @@
+snd-hda-codec-cs8409-imac (1.13) resolute; urgency=medium
+
+  * Speakers: amp->TDM channel map 0/1/3/2. Both prior maps summed L+R per
+    side, which pins the physical speaker pairs as (0xd8,0xde) and (0xda,0xdc);
+    grouping each pair onto one channel should give proper stereo.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 19:50:00 +0000
+
 snd-hda-codec-cs8409-imac (1.12) resolute; urgency=medium
 
   * Speakers: try amp->TDM channel map 0/1/2/3 (was 0/2/1/3) so left/right

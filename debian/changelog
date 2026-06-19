@@ -1,3 +1,11 @@
+snd-hda-codec-cs8409-imac (1.12) resolute; urgency=medium
+
+  * Speakers: try amp->TDM channel map 0/1/2/3 (was 0/2/1/3) so left/right
+    grouping matches the physical wiring; the previous map summed L+R on each
+    side ("everything from the middle"). Empirical; may need another permutation.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 19:30:00 +0000
+
 snd-hda-codec-cs8409-imac (1.11) resolute; urgency=medium
 
   * Speakers: fix the ASP1 bit-clock setup. ASP1_CLK_CTRL1 (coef 0x03) and

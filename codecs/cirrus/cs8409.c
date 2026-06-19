@@ -1333,7 +1333,10 @@ static void cs8409_cs42l83_speaker_setup(struct hda_codec *codec)
 		{ 0x13, 0x00 }, { 0x14, 0x02 },
 	};
 	static const unsigned int amp_addr[4] = { 0xd8, 0xda, 0xdc, 0xde };
-	static const unsigned int amp_chan[4] = { 0x00, 0x02, 0x01, 0x03 };
+	/* TDM slot each amp reads. The 2ch stream duplicates as L,R,L,R across
+	 * slots 0..3, so left/right grouping here must match the physical wiring.
+	 */
+	static const unsigned int amp_chan[4] = { 0x00, 0x01, 0x02, 0x03 };
 	unsigned int coef;
 	int a, i;
 

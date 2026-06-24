@@ -1333,12 +1333,15 @@ static void cs8409_cs42l83_speaker_setup(struct hda_codec *codec)
 		{ 0x13, 0x00 }, { 0x14, 0x02 },
 	};
 	static const unsigned int amp_addr[4] = { 0xd8, 0xda, 0xdc, 0xde };
-	/* TDM slot each amp reads. The 2ch stream duplicates as L,R,L,R across
-	 * slots 0..3 (ch0/2 = L, ch1/3 = R). Deduced from L/R testing, the iMac's
-	 * physical speaker pairs are (0xd8,0xde) and (0xda,0xdc), so group each
-	 * pair onto the same channel: 0xd8,0xde -> L (0,2); 0xda,0xdc -> R (1,3).
+	/* TDM slot each amp reads. Physical wiring (confirmed via the 4.0 test):
+	 *   0xd8 = left tweeter, 0xda = left woofer,
+	 *   0xdc = right tweeter, 0xde = right woofer.
+	 * A 2ch stream duplicates as L,R,L,R across slots 0..3 (slots 0,2 = L;
+	 * slots 1,3 = R), so put both left speakers on an L slot and both right
+	 * speakers on an R slot: 0xd8,0xda -> 0,2 (L); 0xdc,0xde -> 1,3 (R). This
+	 * drives all four speakers with correct stereo.
 	 */
-	static const unsigned int amp_chan[4] = { 0x00, 0x01, 0x03, 0x02 };
+	static const unsigned int amp_chan[4] = { 0x00, 0x02, 0x01, 0x03 };
 	unsigned int coef;
 	int a, i;
 

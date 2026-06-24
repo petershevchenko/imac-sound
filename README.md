@@ -32,8 +32,9 @@ headphone/speaker switching, suspend/resume hardening. PCM is fixed at 44.1 kHz
   no-presence/phantom jack so the desktop keeps a usable sink.
 - **Internal mic**: sets DMIC2_SCL_EN (PAD_CFG bit 0x0002) while capturing.
 - **Speakers**: re-enables the ASP1 speaker pins, programs the four TAS5764
-  amps over I2C (addresses 0xd8/0xda/0xdc/0xde, TDM channel map 0/1/3/2 to
-  match the iMac's speaker wiring), sets up the CS8409 ASP1 4-channel TDM path,
+  amps over I2C (addresses 0xd8/0xda/0xdc/0xde = L-tweeter/L-woofer/R-tweeter/
+  R-woofer, TDM channel map 0/2/1/3 so L drives both left speakers and R both
+  right), sets up the CS8409 ASP1 4-channel TDM path,
   and enables the amp rail on GPIO4.
 - GPIO: GPIO0 = CS42L83 IRQ, GPIO1 = CS42L83 reset, GPIO4 = speaker-amp enable.
 

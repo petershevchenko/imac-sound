@@ -1,3 +1,13 @@
+snd-hda-codec-cs8409-imac (1.14) resolute; urgency=medium
+
+  * Speakers: restore amp->TDM channel map 0/2/1/3. The 4.0 surround test
+    confirmed the physical wiring (0xd8=L tweeter, 0xda=L woofer, 0xdc=R
+    tweeter, 0xde=R woofer); this map puts L on both left speakers and R on
+    both right, driving all four with correct stereo. The 1.12/1.13 maps were
+    chasing mono test files and summed L+R per side.
+
+ -- Peter Shev <peter@shev.it>  Thu, 18 Jun 2026 20:40:00 +0000
+
 snd-hda-codec-cs8409-imac (1.13) resolute; urgency=medium
 
   * Speakers: amp->TDM channel map 0/1/3/2. Both prior maps summed L+R per

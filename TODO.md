@@ -1,8 +1,11 @@
 # Handoff / TODO — snd-hda-codec-cs8409-imac
 
-**Working version: 1.19** (built & verified; 1.20 = 1.19 + log/doc cleanup,
-functionally identical). git HEAD is still 1.14 — 1.15–1.20 are built locally
-but **not yet committed** (see "HP/speaker auto-mute — SOLVED" for what changed).
+**Working version: 1.20**, installed and committed (git HEAD =
+`iMac HP/speaker auto-mute via tip-sense poll + amp GPIO [v1.20]`). All of
+output, internal mic, speakers, and HP↔speaker auto-mute work.
+
+**Next task: headset / jack microphone** — see "NEXT TASK" below for a full
+implementation handoff.
 
 ## Current state
 
@@ -68,11 +71,108 @@ Diagnostics tip: detection logs one info line per plug/unplug
 PipeWire holds the device; iterate with reboots (do NOT stop PipeWire over SSH —
 it tears down the user session and drops the connection).
 
+## NEXT TASK — Headset / jack microphone (external mic in the headphone jack)
+
+**Goal:** when a TRRS headset (headphones + inline mic) is plugged into the jack,
+its microphone works as a capture source. Internal mic (DMIC2) already works and
+must keep working; this is an *additive* second input path.
+
+### Signal flow (what the hardware does)
+```
+headset mic  ->  CS42L83 analog ADC  ->  CS42L83 ASP TX
+             ->  CS8409 ASP2 RX (pin 0x3c)  ->  CS8409 ADC node 0x22  ->  host
+```
+ASP2 is **shared/duplex**: the headphone DAC uses ASP2 in the TX direction
+(CS8409 -> CS42L83), the mic uses ASP2 in the RX direction (CS42L83 -> CS8409),
+on the **same 44.1 kHz frame/bit clock**. The HP TX clocking is already set up
+in `cs8409_cs42l83_hw_init()`; the mic work must add the RX direction *without*
+disturbing that clock or the internal DMIC.
+
+### What already exists (free — do NOT redo)
+- HDA topology + userspace controls are already created by the parser:
+  - pin **0x3c** = `CS8409_CS42L83_AMIC_PIN_NID` (= `ASP2_RECEIVER_A`), cfg
+    `0x00ab9030`, pin-ctl `0x20: IN`, feeding **ADC node 0x22**.
+  - amixer already shows a separate **`Mic`** capture control (0x22) next to
+    **`Internal Mic`** (0x45 -> ADC 0x23). GNOME will show it as soon as the
+    path carries audio. ADC 0x22 currently sits at **D3** (powered down) = silent.
+  - `cs8409_cs42l42_exec_verb` already reports `mic_jack_in` for pin 0x3c under
+    `CS8409_IMAC18_3` (made machine-aware in v1.20).
+  - "Mic Capture Volume" kctl (`cs42l42_adc_volume_mixer`) is already added in
+    the PROBE fixup.
+
+### What's missing (the actual work, all in `codecs/cirrus/cs8409.c` + tables)
+1. **CS8409 ASP2 RX path.** `cs8409_cs42l83_hw_init()` only programs ASP2 TX
+   (coefs `ASP2_Tx_RATE1`, `ASP2_A_TX_CTRL1/2`, etc.). Add the RX equivalents —
+   the enum already defines them: `ASP2_Rx_RATE1/2`, `ASP2_Rx_NULL_INS_RMV`,
+   `ASP2_A_RX_CTRL1/2`, plus the ASP2 RX clock bits. Mirror the TX sequence for
+   the receive slots (channels 1+2, 44.1 kHz). Reuse the existing ASP2 clock; do
+   not re-init it in a way that breaks HP.
+2. **CS42L83 ADC bring-up** (in `cs42l83_init_reg_seq`, `cs8409-tables.c`, and/or
+   the capture hook). Power the ADC and enable its ASP TX:
+   - PWR_CTL1 (0x1101): the HP path walks it for the DAC; the ADC needs its own
+     power bits. egorenar note: `set_power_state_on(instate=true)` walks
+     `PWR_CTL1 0xfe -> 0x7e -> 0x7a`. Confirm which bits are ADC vs HP.
+   - Enable the CS42L83 ASP **TX** (page 0x2a registers; the init seq already
+     sets RX-side `0x2a01=0x0c` for the DAC — find/add the TX-enable + slot regs
+     for the ADC).
+   - ADC page 0x23xx is configured a little (`0x2302=0x3f`); verify full ADC
+     setup (digital vol/unmute, HPF, etc.).
+3. **Mic bias (HSBIAS).** Currently `hsbias_hiz = 0x0000` (off). Electret headset
+   mics need bias. `cs42l42_enable_jack_detect()` writes `HSBIAS_SC_AUTOCTL =
+   hsbias_hiz`; set an appropriate HSBIAS value (compare the Dell path which uses
+   0x0020) and/or drive HSBIAS via `MISC_DET_CTL`.
+4. **Capture hook.** `cs42l83_capture_pcm_hook()` today only toggles the DMIC2
+   clock (`PAD_CFG` bit 0x0002) for the internal mic. For the headset mic, power
+   up the CS42L83 ADC + ASP2-RX when capturing (either always-on at init, or —
+   cleaner — gate it when the `Mic` (0x22) source is the active capture).
+5. **Detection (optional, for correctness).** The jack poll currently forces
+   `mic_jack_in = 0` and only reads tip-sense (no CTIA/OMTP type detection — we
+   deliberately bypassed it). Options:
+   - First cut: set `mic_jack_in = hp_jack_in` (assume any plug may be a headset;
+     the mic is just silent for plain headphones). Simple, good enough to test.
+   - Proper: re-introduce headset-type detection (see `cs42l42_manual_hs_det()` /
+     the HSDET auto path) to set `mic_jack_in` only for true CTIA/OMTP headsets.
+
+### Strong recommendation: check egorenar's reference FIRST
+The HP-output and speaker sequences were ported from egorenar's iMac CS8409
+driver (macOS `AppleHDATDM_CS42L83` reverse-engineering). **Before reverse-
+engineering the ADC path from scratch, get that driver and see if it already
+implements the headset-mic capture path** — if so this becomes a port + tune
+(small) instead of fresh RE (multi-iteration). The HP code comments in
+`cs8409_cs42l83_hw_init()` cite the macOS `setupTDMPath(full=1)` sequence;
+the mic path is the matching receive/ADC sequence.
+
+### How to test (output is easy to hear; capture needs method)
+- Hardware: a TRRS headset with an inline mic. `export XDG_RUNTIME_DIR=/run/user/1000`.
+- Record + inspect level:
+  `pw-record --target <Mic-source> /tmp/m.wav` (or `arecord -D ...`), tap the
+  mic / talk, Ctrl-C, then `pw-play /tmp/m.wav` to the internal speakers, or
+  check the captured peak with `sox /tmp/m.wav -n stat` (look for nonzero RMS).
+- Confirm ADC 0x22 leaves D3: `cat /proc/asound/card0/codec#0` -> Node 0x22
+  should show `Power: setting=D0` and `Converter: stream=1` while recording.
+- Iterate with reboots (HDA `reconfig` is blocked by PipeWire; do NOT stop
+  PipeWire over SSH — it drops the session). Use `codec_dbg` + dynamic debug for
+  CS42L83 register traces.
+
+### Risk / gotchas
+- **Don't break HP or internal mic** — ASP2 is shared with HP (clock) and the
+  DMIC shares the `PAD_CFG` coef. Test all three after each change.
+- Duplex ASP2: the CS42L83 must run ADC + DAC on one ASP simultaneously; getting
+  the RX slot/clock wrong likely yields silence or kills HP. This is the main
+  technical risk, analogous to how wrong TX clock bits gave HP silence.
+- Verify mic-bias doesn't introduce hum/pops on the HP output.
+
+### Key code locations
+- `cs8409_cs42l83_hw_init()` — add ASP2 RX setup here (next to the ASP2 TX block).
+- `cs42l83_init_reg_seq` (`cs8409-tables.c`) — CS42L83 ADC power / ASP-TX enable /
+  HSBIAS bring-up lines.
+- `cs42l83_capture_pcm_hook()` — power/gate the headset-mic path on capture.
+- `cs8409_cs42l83_jack_detect()` — set `mic_jack_in` (first cut: = hp_jack_in).
+- `cs8409_cs42l83_codec` (`cs8409-tables.c`) — `hsbias_hiz`, `no_type_dect` if
+  re-enabling type detection.
+
 ## Other not-done items (lower priority)
 
-- Headset mic (external mic in jack, 0x3c → CS42L83 ADC + ASP2-RX). Internal
-  mic is done; headset mic would mirror the HP output power-up (egorenar
-  `set_power_state_on` instate=true: PWR_CTL1 0xfe→0x7e→0x7a).
 - Speaker amps are now gated off when a headphone is plugged in (1.19). They
   are still on whenever no headphone is present (even with nothing playing);
   could additionally gate on stream-active for power saving.

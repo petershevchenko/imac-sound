@@ -56,6 +56,7 @@ static int cs8409_parse_auto_config(struct hda_codec *codec)
 }
 
 static void cs8409_disable_i2c_clock_worker(struct work_struct *work);
+static void cs8409_cs42l83_jack_poll_work(struct work_struct *work);
 
 static struct cs8409_spec *cs8409_alloc_spec(struct hda_codec *codec)
 {
@@ -69,6 +70,8 @@ static struct cs8409_spec *cs8409_alloc_spec(struct hda_codec *codec)
 	codec->power_save_node = 1;
 	mutex_init(&spec->i2c_mux);
 	INIT_DELAYED_WORK(&spec->i2c_clk_work, cs8409_disable_i2c_clock_worker);
+	INIT_DELAYED_WORK(&spec->jack_poll_work, cs8409_cs42l83_jack_poll_work);
+	spec->jack_poll_last_det = -1;
 	snd_hda_gen_spec_init(&spec->gen);
 
 	return spec;
@@ -1009,6 +1012,7 @@ static void cs8409_remove(struct hda_codec *codec)
 
 	/* Cancel i2c clock disable timer, and disable clock if left enabled */
 	cancel_delayed_work_sync(&spec->i2c_clk_work);
+	cancel_delayed_work_sync(&spec->jack_poll_work);
 	cs8409_disable_i2c_clock(codec);
 
 	snd_hda_gen_remove(codec);
@@ -1075,6 +1079,9 @@ static int cs8409_cs42l42_suspend(struct hda_codec *codec)
 	spec->init_done = 0;
 
 	cs8409_enable_ur(codec, 0);
+
+	/* Stop the iMac tip-sense poll (no-op on boards that never start it). */
+	cancel_delayed_work_sync(&spec->jack_poll_work);
 
 	for (i = 0; i < spec->num_scodecs; i++) {
 		if (codec->fixup_id == CS8409_IMAC18_3)
@@ -1148,27 +1155,31 @@ static int cs8409_cs42l42_exec_verb(struct hdac_device *dev, unsigned int cmd, u
 
 	unsigned int nid = ((cmd >> 20) & 0x07f);
 	unsigned int verb = ((cmd >> 8) & 0x0fff);
+	unsigned int hp_nid = CS8409_CS42L42_HP_PIN_NID;
+	unsigned int amic_nid = CS8409_CS42L42_AMIC_PIN_NID;
 
-	/* CS8409 pins have no AC_PINSENSE_PRESENCE
-	 * capabilities. We have to intercept 2 calls for pins 0x24 and 0x34
-	 * and return correct pin sense values for read_pin_sense() call from
-	 * hda_jack based on CS42L42 jack detect status.
+	/* The Apple iMac routes the companion CS42L83 headphone/mic over ASP2,
+	 * so its jack pins differ from the Dell CS42L42 (ASP1) ones.
 	 */
-	switch (nid) {
-	case CS8409_CS42L42_HP_PIN_NID:
-		if (verb == AC_VERB_GET_PIN_SENSE) {
+	if (codec->fixup_id == CS8409_IMAC18_3) {
+		hp_nid = CS8409_CS42L83_HP_PIN_NID;
+		amic_nid = CS8409_CS42L83_AMIC_PIN_NID;
+	}
+
+	/* CS8409 pins have no AC_PINSENSE_PRESENCE capabilities. We have to
+	 * intercept the headphone/mic GET_PIN_SENSE calls and return correct
+	 * pin sense values for read_pin_sense() from hda_jack based on the
+	 * companion codec's jack-detect status.
+	 */
+	if (verb == AC_VERB_GET_PIN_SENSE) {
+		if (nid == hp_nid) {
 			*res = (cs42l42->hp_jack_in) ? AC_PINSENSE_PRESENCE : 0;
 			return 0;
 		}
-		break;
-	case CS8409_CS42L42_AMIC_PIN_NID:
-		if (verb == AC_VERB_GET_PIN_SENSE) {
+		if (nid == amic_nid) {
 			*res = (cs42l42->mic_jack_in) ? AC_PINSENSE_PRESENCE : 0;
 			return 0;
 		}
-		break;
-	default:
-		break;
 	}
 
 	return spec->exec_verb(dev, cmd, flags, res);
@@ -1286,27 +1297,54 @@ void cs8409_cs42l42_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
  *                            CS8409/CS42L83
  ******************************************************************************/
 
-/* Jack unsolicited-response handler for the Apple CS42L83. Mirrors the Dell
- * handler but reports against the ASP2 headphone/mic pins and has no separate
- * speaker pin (internal speakers need the external amp driver).
+/* DET_STATUS1 (0x1b77) tip-sense level (bit7) that means a plug is PRESENT.
+ *
+ * The iMac wires the CS42L83 tip-sense INVERTED relative to the Dell boards
+ * (the init sequence sets TIP_SENSE_INV in TIPSENSE_CTL, 0x1b73 = 0xe0 vs the
+ * Dell 0xc0). The shared CS42L42 TSRS_PLUG_STATUS encoding (TS_PLUG=3) does NOT
+ * apply here (it reads single bits, never 0/3), so use the raw tip-sense level
+ * instead. Measured with nothing plugged: DET_STATUS1 = 0x16, i.e. bit7 = 0;
+ * so a plug present reads bit7 = 1. If detection comes out backwards (speakers
+ * stay muted with nothing plugged, or the headphone never mutes the speakers),
+ * flip this to 0 and rebuild.
  */
-static void cs8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned int res)
+#define CS42L83_TIP_SENSE_LEVEL_PRESENT	1
+
+/* Read the CS42L83 tip-sense level and update cs42l83->hp_jack_in.
+ * Returns 1 on a good read (hp_jack_in is current), <0 on I/O error.
+ */
+static int cs8409_cs42l83_jack_detect(struct sub_codec *cs42l83)
 {
-	struct cs8409_spec *spec = codec->spec;
-	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
-	struct hda_jack_tbl *jk;
+	struct cs8409_spec *spec = cs42l83->codec->spec;
+	int det_status1;
+	unsigned int tip;
 
-	/* Ignore the GPIO edge produced by our own interrupt-status reads. */
-	if (res & cs42l83->irq_mask)
-		return;
+	det_status1 = cs8409_i2c_read(cs42l83, CS42L42_DET_STATUS1);
+	if (det_status1 < 0)
+		return -EIO;
 
-	/* Process detection (keeps the mic state current) but always report the
-	 * headphone as present: the reused CS42L42 detection logic mis-reads the
-	 * iMac's inverted jack-presence circuit, and the headphone is the only
-	 * analog output, so a fixed-present port gives a usable desktop sink.
+	/* Trace the raw register only when it changes (quiet poll); enable with
+	 * dynamic debug if jack detection ever needs re-checking.
 	 */
-	cs42l42_jack_unsol_event(cs42l83);
-	cs42l83->hp_jack_in = 1;
+	if (det_status1 != spec->jack_poll_last_det) {
+		codec_dbg(cs42l83->codec, "CS42L83 DET_STATUS1(0x1b77)=0x%02x\n", det_status1);
+		spec->jack_poll_last_det = det_status1;
+	}
+
+	tip = (det_status1 & CS42L42_TIP_SENSE_MASK) ? 1 : 0;
+	cs42l83->hp_jack_in = (tip == CS42L83_TIP_SENSE_LEVEL_PRESENT);
+	/* Headset mic (jack 0x3c) is not wired up yet; report it absent. */
+	cs42l83->mic_jack_in = 0;
+
+	return 1;
+}
+
+/* Notify the HDA core / userspace of the current headphone & mic pin sense
+ * (updates the jack kcontrols and lets PipeWire pick the headphone port).
+ */
+static void cs8409_cs42l83_report_jack(struct hda_codec *codec)
+{
+	struct hda_jack_tbl *jk;
 
 	jk = snd_hda_jack_tbl_get_mst(codec, CS8409_CS42L83_HP_PIN_NID, 0);
 	if (jk)
@@ -1316,6 +1354,86 @@ static void cs8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned in
 	if (jk)
 		snd_hda_jack_unsol_event(codec, (jk->tag << AC_UNSOL_RES_TAG_SHIFT) &
 						 AC_UNSOL_RES_TAG);
+}
+
+/* Enable/disable the internal-speaker TAS5764 amps via GPIO4 (the amp-enable
+ * line). Driven high at init = amps on; we gate it from the jack poll so the
+ * internal speakers are silenced whenever a headphone is plugged in. The
+ * generic parser and userspace never touch this GPIO, so this is conflict-free.
+ */
+static void cs8409_cs42l83_set_speaker_amps(struct hda_codec *codec, bool on)
+{
+	struct cs8409_spec *spec = codec->spec;
+	unsigned int data;
+
+	data = snd_hda_codec_read(codec, CS8409_PIN_AFG, 0, AC_VERB_GET_GPIO_DATA, 0);
+	if (on)
+		data |= CS8409_CS42L83_AMP_PDN;
+	else
+		data &= ~CS8409_CS42L83_AMP_PDN;
+
+	if (data == spec->gpio_data)
+		return;
+	spec->gpio_data = data;
+	snd_hda_codec_write(codec, CS8409_PIN_AFG, 0, AC_VERB_SET_GPIO_DATA, data);
+}
+
+/* Apply the current jack state to the outputs: internal speaker amps on only
+ * when no headphone is plugged, and notify the HDA core / userspace of the
+ * headphone jack presence (for the port indicator).
+ */
+static void cs8409_cs42l83_update_outputs(struct hda_codec *codec)
+{
+	struct cs8409_spec *spec = codec->spec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+
+	codec_info(codec, "CS42L83 headphone %s; internal speakers %s\n",
+		   cs42l83->hp_jack_in ? "plugged in" : "unplugged",
+		   cs42l83->hp_jack_in ? "muted" : "on");
+
+	cs8409_cs42l83_set_speaker_amps(codec, !cs42l83->hp_jack_in);
+	cs8409_cs42l83_report_jack(codec);
+}
+
+/* Poll interval for the headphone jack (no interrupt is wired on this board). */
+#define CS42L83_JACK_POLL_MS	500
+
+/* Periodic tip-sense poll: the CS42L83 does not deliver a jack unsolicited
+ * response through the CS8409 on the iMac, so read the tip-sense on a timer and
+ * notify the HDA core (which auto-mutes the speakers) when the state changes.
+ */
+static void cs8409_cs42l83_jack_poll_work(struct work_struct *work)
+{
+	struct cs8409_spec *spec = container_of(work, struct cs8409_spec,
+						jack_poll_work.work);
+	struct hda_codec *codec = spec->codec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+	int prev = cs42l83->hp_jack_in;
+
+	if (!cs42l83->suspended &&
+	    cs8409_cs42l83_jack_detect(cs42l83) > 0 &&
+	    cs42l83->hp_jack_in != prev)
+		cs8409_cs42l83_update_outputs(codec);
+
+	queue_delayed_work(system_power_efficient_wq, &spec->jack_poll_work,
+			   msecs_to_jiffies(CS42L83_JACK_POLL_MS));
+}
+
+/* Jack unsolicited-response handler for the Apple CS42L83. The board wires no
+ * jack interrupt to the CS8409, so this is normally never called (detection is
+ * driven by cs8409_cs42l83_jack_poll_work); handle it anyway for robustness.
+ */
+static void cs8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned int res)
+{
+	struct cs8409_spec *spec = codec->spec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+
+	/* Ignore the GPIO edge produced by our own interrupt-status reads. */
+	if (res & cs42l83->irq_mask)
+		return;
+
+	if (cs8409_cs42l83_jack_detect(cs42l83) > 0)
+		cs8409_cs42l83_update_outputs(codec);
 }
 
 /* Bring up the internal speakers. The iMac drives 4 speakers via 4 TAS5764
@@ -1448,6 +1566,14 @@ static void cs8409_cs42l83_hw_init(struct hda_codec *codec)
 
 	/* Enable Unsolicited Response */
 	cs8409_enable_ur(codec, 1);
+
+	/* No jack interrupt is wired on this board, so start polling the
+	 * tip-sense to drive speaker/headphone auto-mute. Re-armed on resume
+	 * (this runs again), cancelled on suspend/remove.
+	 */
+	spec->jack_poll_last_det = -1;
+	mod_delayed_work(system_power_efficient_wq, &spec->jack_poll_work,
+			 msecs_to_jiffies(CS42L83_JACK_POLL_MS));
 }
 
 /* Apple playback hook. macOS configures/locks the CS42L83 at playback start,
@@ -1554,14 +1680,16 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_A, 0x90100110);
 		snd_hda_codec_set_pincfg(codec, CS8409_PIN_ASP1_TRANSMITTER_B, 0x90100111);
 
-		/* Make the headphone a no-presence (phantom) jack so it is always
-		 * available to userspace. The reused CS42L42 detection mis-reads the
-		 * iMac's inverted jack circuit, leaving the port "unavailable" and
-		 * PipeWire on a Dummy sink; HP is the only analog output, so set the
-		 * NO_PRESENCE misc bit (0x100) in the HP pin's default config.
+		/* Keep the headphone pin's real (presence-capable) BIOS config
+		 * (0x002b4020 from cs8409_cs42l83_pincfgs) so userspace sees a real
+		 * headphone jack. Both the internal speakers and the headphone stay
+		 * active output paths in the parser; the driver itself mutes the
+		 * internal speakers by gating the external amps (GPIO4) from the
+		 * tip-sense poll. We suppress the generic auto-mute because (a) the
+		 * speakers parse as line-outs so it defaults off, and (b) WirePlumber
+		 * turns the "Auto-Mute Mode" control off and does cosmetic port
+		 * switching, so relying on it is unreliable.
 		 */
-		snd_hda_codec_set_pincfg(codec, CS8409_CS42L83_HP_PIN_NID, 0x002b4120);
-
 		spec->gen.suppress_auto_mute = 1;
 		spec->gen.no_primary_hp = 1;
 		spec->gen.suppress_vmaster = 1;
@@ -1586,8 +1714,8 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 
 		spec->scodecs[CS8409_CODEC0]->hsbias_hiz = 0x0000;
 		spec->scodecs[CS8409_CODEC0]->full_scale_vol = CS42L42_FULL_SCALE_VOL_0DB;
-		/* Headphone is treated as always present (see jack unsol handler). */
-		spec->scodecs[CS8409_CODEC0]->hp_jack_in = 1;
+		/* Real jack detection seeds hp_jack_in at INIT/BUILD; start absent. */
+		spec->scodecs[CS8409_CODEC0]->hp_jack_in = 0;
 		break;
 	case HDA_FIXUP_ACT_PROBE:
 		/* Fix Sample Rate to 44.1kHz */
@@ -1607,15 +1735,20 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 	case HDA_FIXUP_ACT_INIT:
 		cs8409_cs42l83_hw_init(codec);
 		spec->init_done = 1;
-		if (spec->init_done && spec->build_ctrl_done
-			&& !spec->scodecs[CS8409_CODEC0]->hp_jack_in)
-			cs42l42_run_jack_detect(spec->scodecs[CS8409_CODEC0]);
+		/* Seed the real jack state once both init and controls are up, and
+		 * apply it (gate the speaker amps, report the jack).
+		 */
+		if (spec->init_done && spec->build_ctrl_done) {
+			cs8409_cs42l83_jack_detect(spec->scodecs[CS8409_CODEC0]);
+			cs8409_cs42l83_update_outputs(codec);
+		}
 		break;
 	case HDA_FIXUP_ACT_BUILD:
 		spec->build_ctrl_done = 1;
-		if (spec->init_done && spec->build_ctrl_done
-			&& !spec->scodecs[CS8409_CODEC0]->hp_jack_in)
-			cs42l42_run_jack_detect(spec->scodecs[CS8409_CODEC0]);
+		if (spec->init_done && spec->build_ctrl_done) {
+			cs8409_cs42l83_jack_detect(spec->scodecs[CS8409_CODEC0]);
+			cs8409_cs42l83_update_outputs(codec);
+		}
 		break;
 	default:
 		break;

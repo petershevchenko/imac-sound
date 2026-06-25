@@ -358,6 +358,10 @@ struct cs8409_spec {
 	unsigned int dev_addr;
 	struct delayed_work i2c_clk_work;
 
+	/* iMac CS42L83 fires no jack interrupt, so poll the tip-sense instead. */
+	struct delayed_work jack_poll_work;
+	int jack_poll_last_det;
+
 	unsigned int playback_started:1;
 	unsigned int capture_started:1;
 	unsigned int init_done:1;

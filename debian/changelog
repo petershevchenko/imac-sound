@@ -1,3 +1,77 @@
+snd-hda-codec-cs8409-imac (1.20) resolute; urgency=medium
+
+  * Cleanup only (functionally identical to the verified 1.19): trim the
+    diagnostic register dump to codec_dbg, log one concise info line per
+    plug/unplug ("CS42L83 headphone plugged in/unplugged"), and tidy comments.
+
+ -- Peter Shev <peter@shev.it>  Wed, 25 Jun 2026 17:00:00 +0000
+
+snd-hda-codec-cs8409-imac (1.19) resolute; urgency=medium
+
+  * Mute internal speakers in the driver via the amp-enable GPIO, not via the
+    generic auto-mute. Testing showed the headphone path and speakers both work,
+    but the speakers parse as line-outs (speaker_outs=0) so "Auto-Mute Mode"
+    defaults off, and WirePlumber turns it off anyway and does only cosmetic
+    port switching — so the speakers never muted on headphone insert. Now the
+    tip-sense poll drives GPIO4 (the external TAS5764 amp enable) directly:
+    amps on when nothing is plugged, off when a headphone is inserted. This is
+    conflict-free (neither the parser nor userspace touch that GPIO) and gives
+    guaranteed silence. suppress_auto_mute is restored so the confusing,
+    userspace-disabled "Auto-Mute Mode" control is gone. Applied from the poll,
+    the unsol handler, and at init/build.
+
+ -- Peter Shev <peter@shev.it>  Wed, 25 Jun 2026 16:30:00 +0000
+
+snd-hda-codec-cs8409-imac (1.18) resolute; urgency=medium
+
+  * Fix tip-sense polarity. The 1.16 boot read (DET_STATUS1=0x16, bit7=0) was
+    taken with the jack UNPLUGGED, not plugged as first assumed, so a plug
+    present reads bit7=1: set CS42L83_TIP_SENSE_LEVEL_PRESENT=1. (This is also
+    the fail-safe direction — if still wrong, speakers just don't mute rather
+    than going silent at idle.)
+
+ -- Peter Shev <peter@shev.it>  Wed, 25 Jun 2026 15:00:00 +0000
+
+snd-hda-codec-cs8409-imac (1.17) resolute; urgency=medium
+
+  * HP/speaker auto-mute via polling. Diagnostics (1.16) confirmed the CS42L83
+    delivers NO jack unsolicited response through the CS8409 on the iMac, and
+    that the shared CS42L42 TSRS_PLUG_STATUS encoding does not apply (it reads
+    single bits, never the 0/3 plug/unplug values). So: drive detection from a
+    500ms tip-sense poll (new cs8409_cs42l83_jack_poll_work) and read the raw
+    tip-sense LEVEL from DET_STATUS1 (0x1b77) bit7 instead. Measured plugged =
+    0x16 (bit7=0), so present == tip-sense-clear (CS42L83_TIP_SENSE_LEVEL_PRESENT
+    = 0; flip to 1 if backwards). Poll is started in hw_init, re-armed on
+    resume, cancelled on suspend/remove. Logs the registers only on change.
+
+ -- Peter Shev <peter@shev.it>  Wed, 25 Jun 2026 14:00:00 +0000
+
+snd-hda-codec-cs8409-imac (1.16) resolute; urgency=medium
+
+  * DIAGNOSTIC build (not a finished feature). Logs every CS42L83 unsolicited
+    response (raw res, before filtering) and dumps both candidate tip-sense
+    sources (TSRS_PLUG_STATUS 0x130f and DET_STATUS1 0x1b77) on every jack
+    read, all at info level. Used to determine whether plug/unplug generate
+    interrupts at all and what the inverted tip-sense actually reads, so the
+    1.15 auto-mute detection can be finalized.
+
+ -- Peter Shev <peter@shev.it>  Wed, 25 Jun 2026 12:00:00 +0000
+
+snd-hda-codec-cs8409-imac (1.15) resolute; urgency=medium
+
+  * Headphone/speaker auto-mute: replace the phantom always-present headphone
+    jack with real tip-sense detection so the internal speakers and the
+    headphone become mutually exclusive (HP in -> speakers mute & HP plays;
+    HP out -> speakers play). Reads the inverted CS42L83 tip-sense in a new
+    cs8409_cs42l83_jack_detect() and lets the generic parser's auto-mute
+    handle the switching (dropped suppress_auto_mute and the forced
+    hp_jack_in=1 / NO_PRESENCE pincfg). The internal speakers stay a fixed
+    always-present sink, so userspace keeps a real output in both states (no
+    PipeWire "Dummy Output" regression). Jack polarity is isolated to the
+    CS42L83_JACK_PRESENT_ON_TS_PLUG macro; detection logs to dmesg.
+
+ -- Peter Shev <peter@shev.it>  Wed, 25 Jun 2026 00:00:00 +0000
+
 snd-hda-codec-cs8409-imac (1.14) resolute; urgency=medium
 
   * Speakers: restore amp->TDM channel map 0/2/1/3. The 4.0 surround test

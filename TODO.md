@@ -1,15 +1,17 @@
 # Handoff / TODO — snd-hda-codec-cs8409-imac
 
-Last updated end of the session that got headphone + internal mic + stereo
-speakers working. **Installed & working version: 1.14** (git HEAD).
+**Working version: 1.19** (built & verified; 1.20 = 1.19 + log/doc cleanup,
+functionally identical). git HEAD is still 1.14 — 1.15–1.20 are built locally
+but **not yet committed** (see "HP/speaker auto-mute — SOLVED" for what changed).
 
-## Current state (all in git, ~15 commits)
+## Current state
 
 | Feature | Status |
 |---|---|
 | 🎧 Headphone output (CS42L83 / ASP2, 44.1 kHz) | WORKS |
 | 🎤 Internal mic (DMIC2, pin 0x45 → ADC 0x23) | WORKS |
 | 🔊 Internal speakers (4× TAS5764 on ASP1 4-ch TDM) | WORKS — stereo correct (4.1/2.1/stereo all good) |
+| 🔀 HP ↔ speaker auto-mute (jack in → speakers off, HP plays) | WORKS (1.19, verified 7 cycles) |
 | Suspend/resume | WORKS (audio comes back) |
 
 Build/iterate: edit `codecs/cirrus/cs8409.{c,h}` / `cs8409-tables.c`, bump
@@ -24,83 +26,54 @@ GNOME login). **Do NOT use /usr/share/sounds/alsa/Front_*.wav for stereo tests �
 they are MONO** (PipeWire duplicates them, always sounds centered). Generate a
 true one-sided stereo wav with python `wave`, or use GNOME → Sound → Test.
 
-## THE OPEN BUG — headphone & speakers are not mutually exclusive
+## HP/speaker auto-mute — SOLVED (v1.16–1.19)
 
-**Symptom:** selecting the **Headphones** port in GNOME still plays the
-**internal speakers** (the jack and the speakers are not isolated).
+**Goal achieved:** headphone in → internal speakers mute & HP plays; HP out →
+speakers play. Implemented in `codecs/cirrus/cs8409.c`.
 
-**Root cause (confirmed by diagnostics):** with the Headphones port active and
-audio playing, ALL output DACs stream — `0x02`+`0x03` (speakers) AND `0x0a`
-(headphone) all show `stream=1`, and pins `0x24`/`0x25`/`0x2c` are all OUT
-(0x40). The single analog PCM is fed to every output at once, and the speaker
-amps are always-on, so the internal speakers play regardless of the selected
-port. Port "selection" in PipeWire is cosmetic at the HDA level here.
+How it actually works (several wrong turns corrected along the way):
 
-**Why we're in this state:** to fix an earlier PipeWire "Dummy Output" problem
-(when headphone was the ONLY output), we:
-  1. made the HP a **phantom / no-presence jack** —
-     `snd_hda_codec_set_pincfg(codec, 0x2c, 0x002b4120)` (NO_PRESENCE bit) in
-     `cs8409_cs42l83_fixups()` PRE_PROBE;
-  2. force `hp_jack_in = 1` (in the fixup and in
-     `cs8409_cs42l83_jack_unsol_event()`);
-  3. set `spec->gen.suppress_auto_mute = 1` and `no_primary_hp = 1`.
-That was correct for a single output, but with speakers added there is now
-nothing telling the driver "HP in use → mute internal speakers."
+1. **No jack interrupt.** The CS42L83 delivers NO unsolicited response through
+   the CS8409 on this board (confirmed: real plug/unplug produced zero unsol
+   events even with pre-filter logging). So detection is **polled**: a 500 ms
+   `delayed_work` (`cs8409_cs42l83_jack_poll_work`, started in `hw_init`,
+   re-armed on resume, cancelled on suspend/remove).
+2. **Tip-sense read.** The shared CS42L42 `TSRS_PLUG_STATUS` (TS_PLUG=3) encoding
+   does NOT apply here — it reads single bits, never 0/3. Use the raw tip-sense
+   LEVEL: `DET_STATUS1` (0x1b77) bit7. Measured **unplugged = 0x16 (bit7=0)**,
+   **plugged = 0x96 (bit7=1)**. Polarity macro: `CS42L83_TIP_SENSE_LEVEL_PRESENT`
+   (=1; flip to 0 if ever backwards).
+3. **Muting via the amp GPIO, not the generic auto-mute.** The speakers parse as
+   line-outs (`speaker_outs=0`), so "Auto-Mute Mode" defaults off; and
+   WirePlumber turns it off anyway and only does cosmetic port switching. So the
+   driver mutes the speakers itself by gating **GPIO4** (the external TAS5764 amp
+   enable, `CS8409_CS42L83_AMP_PDN`): amps on when HP out, off when HP in
+   (`cs8409_cs42l83_set_speaker_amps` / `cs8409_cs42l83_update_outputs`). Nothing
+   in the parser or userspace touches that GPIO → conflict-free, guaranteed
+   silence, no hum. `suppress_auto_mute = 1` is kept so the confusing
+   userspace-disabled control is gone.
+4. **Pin-sense intercept made machine-aware.** `cs8409_cs42l42_exec_verb` only
+   knew the Dell ASP1 NIDs; it now returns hp/mic presence for the iMac ASP2
+   NIDs (0x2c / 0x3c) under `CS8409_IMAC18_3`, so the jack kcontrol/PipeWire see
+   the real state.
 
-## THE FIX — real jack-detection-based auto-mute
+Headphone output itself was verified fine while ASP1/speakers run (the TODO's
+old open question) — the earlier "no HP sound" was just the HP volume at ~7%.
+Plugging/unplugging briefly pauses the playing app (PipeWire reroutes) — normal.
 
-Goal: HP plugged in → internal speakers auto-mute (and HP plays); HP unplugged
-→ internal speakers play. This is the standard HDA auto-mute, which we bypassed.
-
-Plan:
-1. **Fix the inverted jack detection.** The iMac uses an INVERTED tip-sense
-   circuit (init_seq writes `0x1b73 = 0xe0`, vs `0xc0` non-inverted — see
-   `cs42l83_init_reg_seq` in `cs8409-tables.c` and egorenar
-   `cs42l83_tip_sense(codec, invert=1)`). The reused
-   `cs42l42_jack_unsol_event()` / `cs42l42_run_jack_detect()` mis-read it (HP
-   reported unplugged when plugged), which is why we went phantom. Get
-   `cs42l83->hp_jack_in` to reflect reality: read TSRS_PLUG_STATUS (0x130F) /
-   the 0x1B detect regs and invert the interpretation as needed. Verify with
-   the user plugging/unplugging while watching `amixer -c 0 contents | grep -A3
-   "Headphone Jack"` (run as root).
-2. **Remove the phantom/forced-present hacks:** restore HP pincfg to
-   `0x002b4020` (drop the `0x002b4120` NO_PRESENCE override), drop the
-   `hp_jack_in = 1` forces in the fixup and the unsol handler (let the unsol
-   handler report the real detected state).
-3. **Enable auto-mute:** drop `suppress_auto_mute = 1` (and reconsider
-   `no_primary_hp`) so the generic parser mutes the speaker pins/DACs when the
-   HP jack is present. Confirm the speaker amps stop driving when HP is in (the
-   parser should disable pins 0x24/0x25; if the always-on amps still hum,
-   gate them on the speaker pin's OUT state or mute amp reg 0x01).
-4. **Re-verify the original "Dummy Output" problem does NOT return.** That was
-   the whole reason for the phantom. With working detection: HP unplugged →
-   speaker (internal, always-present) port keeps a real sink; HP plugged → HP
-   port available. Neither should fall back to `auto_null`. Test both states.
-
-Key code locations (all in `codecs/cirrus/cs8409.c`):
-- `cs8409_cs42l83_fixups()` — PRE_PROBE sets the phantom pincfg, GPIO
-  (gpio_mask 0x1f), `hp_jack_in = 1`, `suppress_auto_mute`, `no_primary_hp`;
-  PROBE sets the playback/capture hooks and names.
-- `cs8409_cs42l83_jack_unsol_event()` — currently forces `hp_jack_in = 1`.
-- `cs8409_cs42l83_hw_init()` — ASP2 (HP) + `cs42l42_resume()` +
-  `cs8409_cs42l83_speaker_setup()` (amps, always-on at init).
-- `cs8409_cs42l83_speaker_setup()` — amp programming + ASP1 TDM; amp channel
-  map `{0,2,1,3}` (physical: 0xd8=L-tweet, 0xda=L-woof, 0xdc=R-tweet,
-  0xde=R-woof).
-
-## Open item to clarify with the user (asked, not yet answered)
-
-When Headphones is selected, does the jack output audio AT ALL (alongside the
-internal speakers), or ONLY internal speakers? `0x0a` streams, so the jack
-*should* work — confirm whether the jack output itself is fine and it's purely
-"speakers not muted," or if the jack is also dead (would point at an ASP1/ASP2
-or CS42L83 resource conflict when both stream).
+Diagnostics tip: detection logs one info line per plug/unplug
+(`CS42L83 headphone plugged in/unplugged`); raw `DET_STATUS1` is at `codec_dbg`
+(enable with `echo "module snd_hda_codec_cs8409 +p" > \
+/sys/kernel/debug/dynamic_debug/control`). HDA `reconfig` is blocked while
+PipeWire holds the device; iterate with reboots (do NOT stop PipeWire over SSH —
+it tears down the user session and drops the connection).
 
 ## Other not-done items (lower priority)
 
 - Headset mic (external mic in jack, 0x3c → CS42L83 ADC + ASP2-RX). Internal
   mic is done; headset mic would mirror the HP output power-up (egorenar
   `set_power_state_on` instate=true: PWR_CTL1 0xfe→0x7e→0x7a).
-- Speaker amps are always-on at init (Phase 1). Could gate on speaker-port
-  active for power/cleanliness once auto-mute exists.
+- Speaker amps are now gated off when a headphone is plugged in (1.19). They
+  are still on whenever no headphone is present (even with nothing playing);
+  could additionally gate on stream-active for power saving.
 - Speaker volume calibration; suspend/resume hardening.

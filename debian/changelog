@@ -1,3 +1,39 @@
+snd-hda-codec-cs8409-imac (1.33) resolute; urgency=medium
+
+  * Add headset / jack-microphone capture (TRRS inline mic), additive alongside
+    the internal mic and robust across unplug/replug cycles. The CS42L83
+    digitises the jack mic and sends it over ASP2 to CS8409 ADC node 0x1a (pin
+    0x3c); the bring-up is ported/derived from egorenar's macOS-RE
+    AppleHDATDM_CS42L83 sequence. Key points worked out during bring-up:
+    - Capture runs in the generic parser's dyn_adc_switch mode, so the capture
+      hook's hinfo->nid is always the nominal adc_nids[0] (0x12); the headset is
+      identified by the selected input-mux pin (0x3c). (0x22 is line-in.)
+    - The bring-up must run at capture time, not jack-plug time (the CS8409 ASP2
+      clock is gated when idle, so the RX desyncs before capture). It is driven
+      from the capture PREPARE hook (cold boot / fresh captures) and from
+      cap_sync_hook (input switch on replug, where PipeWire issues no PREPARE).
+      Jack detection only tears the path down on unplug.
+    - The CS8409 ASP2-RX slots are re-armed every capture (RX loses frame sync
+      when the CS42L83 stops transmitting). PWR_CTL1 is walked to 0x12 powering
+      BOTH sides — the output SRC (OASRC: ADC -> ASP TX) only locks with the
+      mixer / ASP-in powered, so input-only power left the mic silent unless HP
+      audio happened to be playing.
+    - Electret mic bias via HSBIAS 2.7V (MISC_DET_CTL 0x1b74 = 0x07, HSDET2
+      handshake). Level via the +20dB ADC digital boost (ADC_CTL 0x1d01 bit0) —
+      there is no analog PGA and the digital ADC Volume tops out at +12dB.
+    - The internal DMIC clock is enabled permanently in hw_init (the capture hook
+      is not reliably invoked when the input switches).
+  * Readability: replace raw register/value magic in the iMac paths with named
+    constants — CS42L83 regs use the <sound/cs42l42.h> family macros and named
+    PWR_CTL1 bit masks; the TAS5760 speaker-amp register map, amp I2C addresses,
+    SRC status bits, sample-rate values and the CS8409 TDM-commit verb get
+    #defines; the 0x6b/0x6c/0x71 coefs use the existing ASP*_INTRN_STS /
+    ASP_UNS_RESP_MASK enum names. No functional change.
+  * Add tools/audio-state.sh: a read-only audio-state snapshot used for debugging
+    routing/jack/mute issues during this work.
+
+ -- Peter Shev <peter@shev.it>  Tue, 30 Jun 2026 12:00:00 +0000
+
 snd-hda-codec-cs8409-imac (1.20) resolute; urgency=medium
 
   * Cleanup only (functionally identical to the verified 1.19): trim the

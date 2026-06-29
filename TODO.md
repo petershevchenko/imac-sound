@@ -1,11 +1,25 @@
 # Handoff / TODO — snd-hda-codec-cs8409-imac
 
-**Working version: 1.20**, installed and committed (git HEAD =
-`iMac HP/speaker auto-mute via tip-sense poll + amp GPIO [v1.20]`). All of
-output, internal mic, speakers, and HP↔speaker auto-mute work.
+**Working version: 1.33.** Output, internal mic, speakers, HP↔speaker auto-mute,
+AND the headset/jack mic all work, including across unplug/replug cycles.
 
-**Next task: headset / jack microphone** — see "NEXT TASK" below for a full
-implementation handoff.
+**Headset mic: DONE in 1.33** (verified: boot, unplug→internal, replug→headset;
+normal speech ~-25 dBFS). See "HEADSET MIC — SOLVED" below for the (many)
+non-obvious keys; the short version:
+- Capture runs in the parser's **dyn_adc_switch** mode, so `hinfo->nid` is always
+  the nominal `adc_nids[0]` (0x12); the headset is identified by the selected
+  input-mux pin (0x3c → ADC 0x1a). pin 0x22 is line-in, not the mic.
+- The bring-up must run **at capture time** (the ASP2 clock is gated when idle).
+  Triggered from the capture **PREPARE** hook (boot/fresh) AND **cap_sync_hook**
+  (input switch on replug, where PipeWire issues no PREPARE). jack detect only
+  tears the path down on unplug.
+- Re-arm the **CS8409 ASP2-RX** slots every capture (RX loses sync when the
+  CS42L83 stops transmitting). Power **both** PWR_CTL1 sides to 0x12 (the output
+  SRC/OASRC only locks with the mixer/ASP-in powered). Electret needs **HSBIAS**
+  (MISC_DET_CTL 0x1b74 = 0x07). Level needs the **+20 dB ADC boost** (ADC_CTL
+  0x1d01 bit0); there is no analog PGA.
+- Internal DMIC clock is left **permanently on** (hw_init), since the capture
+  hook isn't reliably called on input switches.
 
 ## Current state
 
@@ -13,6 +27,7 @@ implementation handoff.
 |---|---|
 | 🎧 Headphone output (CS42L83 / ASP2, 44.1 kHz) | WORKS |
 | 🎤 Internal mic (DMIC2, pin 0x45 → ADC 0x23) | WORKS |
+| 🎙️ Headset/jack mic (pin 0x3c → CS42L83 ADC → ASP2 → ADC 0x1a) | WORKS (1.33; survives unplug/replug) |
 | 🔊 Internal speakers (4× TAS5764 on ASP1 4-ch TDM) | WORKS — stereo correct (4.1/2.1/stereo all good) |
 | 🔀 HP ↔ speaker auto-mute (jack in → speakers off, HP plays) | WORKS (1.19, verified 7 cycles) |
 | Suspend/resume | WORKS (audio comes back) |
@@ -71,11 +86,26 @@ Diagnostics tip: detection logs one info line per plug/unplug
 PipeWire holds the device; iterate with reboots (do NOT stop PipeWire over SSH —
 it tears down the user session and drops the connection).
 
-## NEXT TASK — Headset / jack microphone (external mic in the headphone jack)
+## HEADSET MIC — SOLVED (1.24); section below is the implementation record
 
-**Goal:** when a TRRS headset (headphones + inline mic) is plugged into the jack,
-its microphone works as a capture source. Internal mic (DMIC2) already works and
-must keep working; this is an *additive* second input path.
+**Done.** A TRRS headset's inline mic works as an additive capture source. The
+two things the original plan got wrong (and how 1.24 fixed them):
+- **ADC node:** the plan assumed pin 0x3c → ADC 0x22. Live topology: 0x3c → ADC
+  **0x1a** (0x22 is the line-in). More importantly, capture is **dyn_adc_switch**,
+  so the hook's `hinfo->nid` is always `adc_nids[0]`=0x12 — dispatch on the
+  selected input-mux pin (`spec->gen.cur_mux[0]` → `imux_pins[]` == 0x3c), not the
+  nid. (`cs42l83_capture_pcm_hook`.)
+- **Mic bias:** the bring-up sequence below is necessary but not sufficient — the
+  electret needs **HSBIAS** (MISC_DET_CTL `0x1b74` = 0x07, with a HSDET_CTL2
+  `0x1120` handshake), enabled on capture / dropped to HiZ on stop. Without it the
+  mic was ~40 dB too quiet. (`cs8409_cs42l83_headset_mic_enable`.)
+
+The signal-flow / register details that follow are accurate and were the basis of
+the working code.
+
+**Original goal:** when a TRRS headset (headphones + inline mic) is plugged into
+the jack, its microphone works as a capture source. Internal mic (DMIC2) already
+works and must keep working; this is an *additive* second input path.
 
 ### Signal flow (what the hardware does)
 ```

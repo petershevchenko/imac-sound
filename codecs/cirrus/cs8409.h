@@ -276,7 +276,85 @@ enum cs8409_coefficient_index_registers {
 #define CS8409_CS42L83_INT			GENMASK(0, 0) /* CS8409_GPIO0 */
 #define CS8409_CS42L83_AMP_PDN			GENMASK(4, 4) /* CS8409_GPIO4, amp enable */
 #define CS8409_CS42L83_HP_PIN_NID		CS8409_PIN_ASP2_TRANSMITTER_A
+/* 0x3c headset-mic jack pin; the CS42L83 digitises it and sends it over ASP2 to
+ * CS8409 ADC node 0x1a. Capture runs in dyn_adc_switch mode, so the headset is
+ * identified by the selected input-mux pin (this NID), not by the stream's ADC.
+ */
 #define CS8409_CS42L83_AMIC_PIN_NID		CS8409_PIN_ASP2_RECEIVER_A
+
+/* CS42L83 register addresses reuse the CS42L42 family map from <sound/cs42l42.h>
+ * (e.g. CS42L42_PWR_CTL1 = 0x1101, CS42L42_SRCPL_INT_STATUS = 0x130b,
+ * CS42L42_SRC_SDOUT_FS = 0x2609, CS42L42_SP_TX_FS = 0x2506). The values below are
+ * the iMac/CS42L83-specific magic the macOS-RE bring-up writes to those regs.
+ */
+
+/* CS42L83 SRC partial-lock status bits in CS42L42_SRCPL_INT_STATUS (0x130b),
+ * polled as the "power-good" gate while staging PWR_CTL1 power-up.
+ */
+#define CS42L83_SRCPL_OUT_LOCK		0x04	/* output (DAC/HP) SRC locked */
+#define CS42L83_SRCPL_IN_LOCK		0x01	/* input (ADC/mic) SRC locked */
+#define CS42L83_PWR_GOOD_POLL_MAX	20	/* power-good poll attempts (~40ms) */
+#define CS42L83_PWR_GOOD_POLL_US	2000	/* delay between power-good polls */
+
+/* CS42L83 ADC digital volume (CS42L42_ADC_VOLUME, 0x1d03). */
+#define CS42L83_ADC_VOL_0DB		0x00
+#define CS42L83_ADC_VOL_MUTE		0x80
+
+/* CS42L83 ADC digital boost (CS42L42_ADC_CTL 0x1d01, bit0). A headset boom mic
+ * is ~20dB too quiet through this codec otherwise — there is no analog PGA, and
+ * the digital ADC Volume control alone tops out at +12dB.
+ */
+#define CS42L83_ADC_DIG_BOOST		(1 << CS42L42_ADC_DIG_BOOST_SHIFT)
+
+/* Headset mic bias (electret) via MISC_DET_CTL (CS42L42_MISC_DET_CTL, 0x1b74),
+ * with a HSDET_CTL2 (0x1120) handshake — egorenar AppleHDA...::powerHSBIAS.
+ */
+#define CS42L83_MISC_DET_HSBIAS_2V7	0x07	/* HSBIAS output 2.7V (bias on) */
+#define CS42L83_MISC_DET_HSBIAS_HIZ	0x01	/* HSBIAS HiZ (bias off) */
+#define CS42L83_HSDET_CTL2_BIAS_CLOSE	0x08	/* HSDET2 handshake during bias on */
+
+/* CS42L83 serial-port / SRC sample-rate register values for 44.1kHz capture. */
+#define CS42L83_SRC_SDOUT_FS_44K1	0x4a	/* -> CS42L42_SRC_SDOUT_FS (0x2609) */
+#define CS42L83_SP_TX_FS_44K1		0xca	/* -> CS42L42_SP_TX_FS (0x2506) */
+
+/* CS8409 vendor verb that commits (latches) the TDM / unsolicited-response coef
+ * block, written at the end of each setupTDMPath sequence (macOS RE).
+ */
+#define CS8409_VENDOR_VERB_TDM_COMMIT	0x7f0
+#define CS8409_TDM_COMMIT_VAL		0x00b6
+
+/* Bit in CS8409_PAD_CFG_SLW_RATE_CTRL (coef 0x82) that gates the DMIC2 SCL
+ * clock; set while capturing from the internal digital mic (ADC node 0x23).
+ */
+#define CS8409_PAD_DMIC2_SCL_EN		0x0002
+
+/* TAS5760 (marketed TAS5764) speaker-amp register map. The iMac drives four of
+ * these Class-D amps over the CS8409 amp-I2C bus; register meanings are from the
+ * TAS5760 datasheet, decoded by egorenar from the macOS AppleHDA TAS576 setup.
+ */
+#define TAS5760_PWR_CTRL		0x01	/* Power Control: sleep / SPK_SD / amp enable */
+#define TAS5760_DIGITAL_CTRL		0x02	/* Digital Control: I2S/TDM format */
+#define TAS5760_VOL_CTRL_CFG		0x03	/* Volume Control config + TDM slot select */
+#define TAS5760_VOL_LEFT		0x04	/* Left-channel digital volume */
+#define TAS5760_ANALOG_CTRL		0x06	/* Analog Control: analog gain / PWM rate */
+#define TAS5760_FAULT_CFG		0x08	/* Fault config & error status */
+#define TAS5760_DIG_CLIP2		0x10	/* Digital clipper [19:12] */
+#define TAS5760_DIG_CLIP1		0x11	/* Digital clipper [11:4] */
+#define TAS5760_REG13			0x13	/* undocumented (from macOS sequence) */
+#define TAS5760_REG14			0x14	/* undocumented (from macOS sequence) */
+/* TAS5760 register values used by the iMac speaker bring-up. */
+#define TAS5760_PWR_SHUTDOWN		0xfc	/* not-sleep, speaker-amp shut down (reset) */
+#define TAS5760_PWR_ON			0xfd	/* not-sleep, speaker amp enabled */
+#define TAS5760_VOL_0DB			0xcf	/* 0 dB digital volume */
+#define TAS5760_VOL_CTRL_CFG_BASE	0x80	/* VOL_CTRL_CFG base; OR in the TDM slot index */
+
+/* CS8409 amp-I2C addresses of the four TAS5760 speaker amps (confirmed by the
+ * 4.0 channel test). A 2ch stream duplicates L,R,L,R across TDM slots 0..3.
+ */
+#define CS8409_IMAC_AMP_L_TWEETER	0xd8
+#define CS8409_IMAC_AMP_L_WOOFER	0xda
+#define CS8409_IMAC_AMP_R_TWEETER	0xdc
+#define CS8409_IMAC_AMP_R_WOOFER	0xde
 
 enum {
 	CS8409_BULLSEYE,
@@ -327,6 +405,14 @@ struct sub_codec {
 	unsigned int irq_mask;
 	const struct cs8409_i2c_param *init_seq;
 	unsigned int init_seq_num;
+
+	/* Per-companion suspend routine and the CS8409 pins this codec's
+	 * headphone/mic jacks are wired to (consulted by the shared suspend
+	 * loop and the GET_PIN_SENSE intercept instead of a per-machine branch).
+	 */
+	void (*suspend)(struct sub_codec *sub_codec);
+	unsigned int hp_pin_nid;
+	unsigned int amic_pin_nid;
 
 	unsigned int hp_jack_in:1;
 	unsigned int mic_jack_in:1;
@@ -409,6 +495,9 @@ extern struct sub_codec cs8409_cs42l83_codec;
 void cs8409_cs42l42_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action);
 void dolphin_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action);
 void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action);
+
+void cs42l42_suspend(struct sub_codec *sub_codec);
+void cs42l83_suspend(struct sub_codec *sub_codec);
 
 extern const struct cs8409_cir_param cs8409_cdb35l56_four_hw_cfg[];
 extern const struct hda_verb cs8409_cdb35l56_four_init_verbs[];

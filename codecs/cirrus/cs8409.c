@@ -57,6 +57,9 @@ static int cs8409_parse_auto_config(struct hda_codec *codec)
 
 static void cs8409_disable_i2c_clock_worker(struct work_struct *work);
 static void cs8409_cs42l83_jack_poll_work(struct work_struct *work);
+static void cs8409_cs42l83_headset_bias(struct hda_codec *codec, bool on);
+static void cs8409_cs42l83_headset_mic_enable(struct hda_codec *codec);
+static void cs8409_cs42l83_headset_mic_disable(struct hda_codec *codec);
 
 static struct cs8409_spec *cs8409_alloc_spec(struct hda_codec *codec)
 {
@@ -943,7 +946,7 @@ static void cs42l42_resume(struct sub_codec *cs42l42)
 	cs42l42_enable_jack_detect(cs42l42);
 }
 
-static void cs42l42_suspend(struct sub_codec *cs42l42)
+void cs42l42_suspend(struct sub_codec *cs42l42)
 {
 	struct hda_codec *codec = cs42l42->codec;
 	struct cs8409_spec *spec = codec->spec;
@@ -987,13 +990,13 @@ static void cs42l42_suspend(struct sub_codec *cs42l42)
  * so use a minimal sequence: mute the headphone, power the codec down via its
  * Power Down Control 1 register, then assert reset through the GPIO line.
  */
-static void cs42l83_suspend(struct sub_codec *cs42l83)
+void cs42l83_suspend(struct sub_codec *cs42l83)
 {
 	struct hda_codec *codec = cs42l83->codec;
 	struct cs8409_spec *spec = codec->spec;
 
-	cs8409_i2c_write(cs42l83, CS42L42_HP_CTL, 0x0D);	/* mute HP */
-	cs8409_i2c_write(cs42l83, 0x1101, 0xFF);	/* Power Down Control 1: down */
+	cs8409_i2c_write(cs42l83, CS42L42_HP_CTL, 0x0D);	/* mute HP (analog A+B) */
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, 0xFF);	/* power everything down */
 
 	cs42l83->suspended = 1;
 	cs42l83->last_page = 0;
@@ -1083,12 +1086,8 @@ static int cs8409_cs42l42_suspend(struct hda_codec *codec)
 	/* Stop the iMac tip-sense poll (no-op on boards that never start it). */
 	cancel_delayed_work_sync(&spec->jack_poll_work);
 
-	for (i = 0; i < spec->num_scodecs; i++) {
-		if (codec->fixup_id == CS8409_IMAC18_3)
-			cs42l83_suspend(spec->scodecs[i]);
-		else
-			cs42l42_suspend(spec->scodecs[i]);
-	}
+	for (i = 0; i < spec->num_scodecs; i++)
+		spec->scodecs[i]->suspend(spec->scodecs[i]);
 
 	/* Cancel i2c clock disable timer, and disable clock if left enabled */
 	cancel_delayed_work_sync(&spec->i2c_clk_work);
@@ -1155,28 +1154,20 @@ static int cs8409_cs42l42_exec_verb(struct hdac_device *dev, unsigned int cmd, u
 
 	unsigned int nid = ((cmd >> 20) & 0x07f);
 	unsigned int verb = ((cmd >> 8) & 0x0fff);
-	unsigned int hp_nid = CS8409_CS42L42_HP_PIN_NID;
-	unsigned int amic_nid = CS8409_CS42L42_AMIC_PIN_NID;
-
-	/* The Apple iMac routes the companion CS42L83 headphone/mic over ASP2,
-	 * so its jack pins differ from the Dell CS42L42 (ASP1) ones.
-	 */
-	if (codec->fixup_id == CS8409_IMAC18_3) {
-		hp_nid = CS8409_CS42L83_HP_PIN_NID;
-		amic_nid = CS8409_CS42L83_AMIC_PIN_NID;
-	}
 
 	/* CS8409 pins have no AC_PINSENSE_PRESENCE capabilities. We have to
 	 * intercept the headphone/mic GET_PIN_SENSE calls and return correct
 	 * pin sense values for read_pin_sense() from hda_jack based on the
-	 * companion codec's jack-detect status.
+	 * companion codec's jack-detect status. The headphone/mic pins differ
+	 * per board (Dell CS42L42 on ASP1, Apple CS42L83 on ASP2), so read them
+	 * from the companion codec rather than hard-coding them here.
 	 */
 	if (verb == AC_VERB_GET_PIN_SENSE) {
-		if (nid == hp_nid) {
+		if (nid == cs42l42->hp_pin_nid) {
 			*res = (cs42l42->hp_jack_in) ? AC_PINSENSE_PRESENCE : 0;
 			return 0;
 		}
-		if (nid == amic_nid) {
+		if (nid == cs42l42->amic_pin_nid) {
 			*res = (cs42l42->mic_jack_in) ? AC_PINSENSE_PRESENCE : 0;
 			return 0;
 		}
@@ -1333,8 +1324,11 @@ static int cs8409_cs42l83_jack_detect(struct sub_codec *cs42l83)
 
 	tip = (det_status1 & CS42L42_TIP_SENSE_MASK) ? 1 : 0;
 	cs42l83->hp_jack_in = (tip == CS42L83_TIP_SENSE_LEVEL_PRESENT);
-	/* Headset mic (jack 0x3c) is not wired up yet; report it absent. */
-	cs42l83->mic_jack_in = 0;
+	/* First-cut headset-mic detection: assume any plug may be a TRRS headset
+	 * and expose the jack mic whenever a jack is present. Plain headphones
+	 * simply yield a silent source. (No CTIA/OMTP type detection yet.)
+	 */
+	cs42l83->mic_jack_in = cs42l83->hp_jack_in;
 
 	return 1;
 }
@@ -1387,11 +1381,23 @@ static void cs8409_cs42l83_update_outputs(struct hda_codec *codec)
 	struct cs8409_spec *spec = codec->spec;
 	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
 
-	codec_info(codec, "CS42L83 headphone %s; internal speakers %s\n",
-		   cs42l83->hp_jack_in ? "plugged in" : "unplugged",
-		   cs42l83->hp_jack_in ? "muted" : "on");
+	codec_dbg(codec, "CS42L83 headphone %s; internal speakers %s\n",
+		  cs42l83->hp_jack_in ? "plugged in" : "unplugged",
+		  cs42l83->hp_jack_in ? "muted" : "on");
 
 	cs8409_cs42l83_set_speaker_amps(codec, !cs42l83->hp_jack_in);
+
+	/* On unplug, tear down the headset-mic path (power off + bias HiZ). The
+	 * bring-up itself happens at capture time (capture hook / cap_sync_hook),
+	 * not here: the ASP2 clock is gated when idle, so enabling at plug time —
+	 * with no active capture — leaves the CS8409 RX desynced by the time capture
+	 * actually runs.
+	 */
+	if (!cs42l83->mic_jack_in) {
+		cs8409_cs42l83_headset_mic_disable(codec);
+		cs8409_cs42l83_headset_bias(codec, false);
+	}
+
 	cs8409_cs42l83_report_jack(codec);
 }
 
@@ -1446,11 +1452,21 @@ static void cs8409_cs42l83_jack_unsol_event(struct hda_codec *codec, unsigned in
 static void cs8409_cs42l83_speaker_setup(struct hda_codec *codec)
 {
 	static const struct { unsigned int reg, val; } amp_reset[] = {
-		{ 0x01, 0xfc }, { 0x02, 0x04 }, { 0x03, 0x80 }, { 0x04, 0xcf },
-		{ 0x06, 0x51 }, { 0x08, 0x00 }, { 0x10, 0xff }, { 0x11, 0xfc },
-		{ 0x13, 0x00 }, { 0x14, 0x02 },
+		{ TAS5760_PWR_CTRL,	TAS5760_PWR_SHUTDOWN },	/* amp shut down */
+		{ TAS5760_DIGITAL_CTRL,	0x04 },			/* I2S format */
+		{ TAS5760_VOL_CTRL_CFG,	TAS5760_VOL_CTRL_CFG_BASE }, /* fade/mute, no slot */
+		{ TAS5760_VOL_LEFT,	TAS5760_VOL_0DB },
+		{ TAS5760_ANALOG_CTRL,	0x51 },			/* PWM rate x16 */
+		{ TAS5760_FAULT_CFG,	0x00 },
+		{ TAS5760_DIG_CLIP2,	0xff },
+		{ TAS5760_DIG_CLIP1,	0xfc },
+		{ TAS5760_REG13,	0x00 },
+		{ TAS5760_REG14,	0x02 },
 	};
-	static const unsigned int amp_addr[4] = { 0xd8, 0xda, 0xdc, 0xde };
+	static const unsigned int amp_addr[4] = {
+		CS8409_IMAC_AMP_L_TWEETER, CS8409_IMAC_AMP_L_WOOFER,
+		CS8409_IMAC_AMP_R_TWEETER, CS8409_IMAC_AMP_R_WOOFER,
+	};
 	/* TDM slot each amp reads. Physical wiring (confirmed via the 4.0 test):
 	 *   0xd8 = left tweeter, 0xda = left woofer,
 	 *   0xdc = right tweeter, 0xde = right woofer.
@@ -1487,21 +1503,26 @@ static void cs8409_cs42l83_speaker_setup(struct hda_codec *codec)
 	cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef | 0x5400);
 	coef = cs8409_vendor_coef_get(codec, CS8409_DEV_CFG2);
 	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG2, coef | 0x0020); /* ASP1_EN */
-	cs8409_vendor_coef_set(codec, 0x6b, 0x001f);
-	coef = cs8409_vendor_coef_get(codec, 0x71);
-	cs8409_vendor_coef_set(codec, 0x71, coef | 0x400f);
-	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0, 0x7f0, 0x00b6);
+	cs8409_vendor_coef_set(codec, CS8409_ASP1_INTRN_STS, 0x001f);
+	coef = cs8409_vendor_coef_get(codec, CS8409_ASP_UNS_RESP_MASK);
+	cs8409_vendor_coef_set(codec, CS8409_ASP_UNS_RESP_MASK, coef | 0x400f);
+	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0,
+			    CS8409_VENDOR_VERB_TDM_COMMIT, CS8409_TDM_COMMIT_VAL);
 
 	/* Configure each amp (I2S, TDM channel, gain, fault) and power it on. */
-	for (a = 0; a < 4; a++) {
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x02, 0x44);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x03, 0x80 | amp_chan[a]);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x06, 0x55);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x08, 0x18);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x04, 0xcf);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x13, 0x00);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x02, 0x44);
-		cs8409_amp_i2c_write(codec, amp_addr[a], 0x01, 0xfd); /* amp on */
+	for (a = 0; a < ARRAY_SIZE(amp_addr); a++) {
+		/* TDM, 24-bit */
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_DIGITAL_CTRL, 0x44);
+		/* unmute + TDM slot */
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_VOL_CTRL_CFG,
+				     TAS5760_VOL_CTRL_CFG_BASE | amp_chan[a]);
+		/* analog gain */
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_ANALOG_CTRL, 0x55);
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_FAULT_CFG, 0x18);
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_VOL_LEFT, TAS5760_VOL_0DB);
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_REG13, 0x00);
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_DIGITAL_CTRL, 0x44);
+		cs8409_amp_i2c_write(codec, amp_addr[a], TAS5760_PWR_CTRL, TAS5760_PWR_ON);
 	}
 }
 
@@ -1533,6 +1554,12 @@ static void cs8409_cs42l83_hw_init(struct hda_codec *codec)
 	cs8409_vendor_coef_set(codec, ASP2_Tx_NULL_INS_RMV, 0x0100);	/* 0x14 */
 	cs8409_vendor_coef_set(codec, ASP2_A_TX_CTRL1, 0x0800);		/* 0x29 */
 	cs8409_vendor_coef_set(codec, ASP2_A_TX_CTRL2, 0x0820);		/* 0x2a */
+
+	/* NB: the ASP2 RX (headset-mic) slot setup is NOT done here — it is applied
+	 * per-capture in cs8409_cs42l83_headset_mic_enable(), because the CS8409 RX
+	 * loses frame sync whenever the CS42L83 stops transmitting (mic torn down on
+	 * unplug) and must be re-armed to survive an unplug/replug cycle.
+	 */
 	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG1, 0xb000);		/* 0x00 */
 	cs8409_vendor_coef_set(codec, CS8409_ASP2_CLK_CTRL2, 0x10ff);	/* 0x07 */
 	coef = cs8409_vendor_coef_get(codec, CS8409_DEV_CFG1);
@@ -1540,7 +1567,12 @@ static void cs8409_cs42l83_hw_init(struct hda_codec *codec)
 	cs8409_vendor_coef_set(codec, CS8409_ASP2_CLK_CTRL1, 0x8000);	/* 0x06: LCHI=0 */
 	cs8409_vendor_coef_set(codec, CS8409_ASP2_CLK_CTRL3, 0x0040);	/* 0x08 base */
 	coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
-	cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef | 0xa800); /* 0x82 */
+	/* +DMIC2 SCL: keep the internal-mic DMIC clock on permanently. Gating it
+	 * per-capture relied on the capture hook, which PipeWire does not reliably
+	 * invoke when the input switches, leaving the internal mic silent.
+	 */
+	cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL,
+			       coef | 0xa800 | CS8409_PAD_DMIC2_SCL_EN); /* 0x82 */
 	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG3, 0x0280);		/* 0x02 */
 
 	/* 44.1kHz sample-rate clocking (setSampleRate). */
@@ -1554,10 +1586,11 @@ static void cs8409_cs42l83_hw_init(struct hda_codec *codec)
 	cs8409_vendor_coef_set(codec, CS8409_DEV_CFG2, coef | 0x0040);
 
 	/* Configure the TDM unsolicited-response routing the macOS driver sets. */
-	cs8409_vendor_coef_set(codec, 0x6c, 0x001f);
-	coef = cs8409_vendor_coef_get(codec, 0x71);
-	cs8409_vendor_coef_set(codec, 0x71, coef | 0x800f);
-	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0, 0x7f0, 0x00b6);
+	cs8409_vendor_coef_set(codec, CS8409_ASP2_INTRN_STS, 0x001f);
+	coef = cs8409_vendor_coef_get(codec, CS8409_ASP_UNS_RESP_MASK);
+	cs8409_vendor_coef_set(codec, CS8409_ASP_UNS_RESP_MASK, coef | 0x800f);
+	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0,
+			    CS8409_VENDOR_VERB_TDM_COMMIT, CS8409_TDM_COMMIT_VAL);
 
 	cs42l42_resume(cs42l83);
 
@@ -1605,15 +1638,18 @@ static void cs42l83_playback_pcm_hook(struct hda_pcm_stream *hinfo,
 		 * power-up and waiting for power-good (0x130b bit2) in between:
 		 *   clear 0x61 -> ASP_DAI + MIXER on, then clear 0x08 -> HP on.
 		 */
-		pwr = cs8409_i2c_read(cs42l83, 0x1101);
-		cs8409_i2c_write(cs42l83, 0x1101, pwr & ~0x61);
-		for (i = 0; i < 20; i++) {
-			if (cs8409_i2c_read(cs42l83, 0x130b) & 0x04)
+		pwr = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+		cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, pwr &
+				 ~(CS42L42_ASP_DAI_PDN_MASK | CS42L42_MIXER_PDN_MASK |
+				   CS42L42_PDN_ALL_MASK));
+		for (i = 0; i < CS42L83_PWR_GOOD_POLL_MAX; i++) {
+			if (cs8409_i2c_read(cs42l83, CS42L42_SRCPL_INT_STATUS) &
+			    CS42L83_SRCPL_OUT_LOCK)
 				break;
-			usleep_range(2000, 2500);
+			usleep_range(CS42L83_PWR_GOOD_POLL_US, CS42L83_PWR_GOOD_POLL_US + 500);
 		}
-		pwr = cs8409_i2c_read(cs42l83, 0x1101);
-		cs8409_i2c_write(cs42l83, 0x1101, pwr & ~0x08);
+		pwr = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+		cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, pwr & ~CS42L42_HP_PDN_MASK);
 
 		/* Unmute the headphone (clear analog A/B mute in HP_CTL). */
 		cs8409_i2c_write(cs42l83, CS42L42_HP_CTL, 0x01);
@@ -1627,10 +1663,175 @@ static void cs42l83_playback_pcm_hook(struct hda_pcm_stream *hinfo,
 	}
 }
 
-/* Apple capture hook. The internal microphone is a digital mic on the CS8409's
- * DMIC2 input (pin 0x45 -> ADC 0x23). The CS8409 only clocks it when the
- * DMIC2_SCL_EN bit (0x0002) is set in PAD_CFG (coef 0x82); enable it while
- * capturing so the DMIC produces data, and clear it afterwards.
+/* Electret mic bias (HSBIAS 2.7V) with the HSDET2 handshake from the macOS
+ * powerHSBIAS sequence. This is analog and clock-independent, so it is driven by
+ * jack presence (on at plug, HiZ at unplug), NOT by capture — gating it on the
+ * capture hook left it off for every capture after the first under PipeWire.
+ */
+static void cs8409_cs42l83_headset_bias(struct hda_codec *codec, bool on)
+{
+	struct cs8409_spec *spec = codec->spec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+
+	if (on) {
+		cs8409_i2c_write(cs42l83, CS42L42_HSDET_CTL2, CS42L83_HSDET_CTL2_BIAS_CLOSE);
+		cs8409_i2c_write(cs42l83, CS42L42_MISC_DET_CTL, CS42L83_MISC_DET_HSBIAS_2V7);
+		cs8409_i2c_write(cs42l83, CS42L42_HSDET_CTL2, 0x00);
+	} else {
+		cs8409_i2c_write(cs42l83, CS42L42_MISC_DET_CTL, CS42L83_MISC_DET_HSBIAS_HIZ);
+	}
+}
+
+/* Headset-mic (jack 0x3c -> CS42L83 ADC -> ASP2 RX -> CS8409 ADC node 0x1a)
+ * capture bring-up, run at capture PREPARE. Ported from egorenar's macOS-RE
+ * AppleHDATDM_CS42L83 enable sequence. Two halves:
+ *  - CS8409 side: re-arm the ASP2 receive slots + TDM-UR. This MUST run every
+ *    capture, not just at hw_init: the CS8409 RX loses frame sync when the
+ *    CS42L83 stops transmitting (mic torn down on unplug), so without re-arming
+ *    here the mic reads digital zero after an unplug/replug cycle even though
+ *    every CS42L83 status register looks correct.
+ *  - CS42L83 side: mic bias, 44.1kHz input rate, ASP TX slots/enable, PWR_CTL1
+ *    input power-up (waiting for SRC lock), and the +20dB ADC digital boost.
+ * HP output (ASP2 TX / PWR_CTL1 bits 6/3) is left untouched.
+ */
+static void cs8409_cs42l83_headset_mic_enable(struct hda_codec *codec)
+{
+	struct cs8409_spec *spec = codec->spec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+	unsigned int reg, coef;
+	int i;
+
+	/* Re-arm the CS8409 ASP2 receive path (slots + TDM unsolicited-response),
+	 * re-locking RX frame sync to the CS42L83 transmitter.
+	 */
+	cs8409_vendor_coef_set(codec, ASP2_Rx_RATE1, 0xaccc);		/* 0x12 */
+	cs8409_vendor_coef_set(codec, ASP2_Rx_NULL_INS_RMV, 0x0001);	/* 0x11 */
+	cs8409_vendor_coef_set(codec, ASP2_A_RX_CTRL1, 0x0800);		/* 0x49 */
+	cs8409_vendor_coef_set(codec, ASP2_A_RX_CTRL2, 0x0820);		/* 0x4a */
+	cs8409_vendor_coef_set(codec, CS8409_ASP2_INTRN_STS, 0x001f);	/* 0x6c */
+	coef = cs8409_vendor_coef_get(codec, CS8409_ASP_UNS_RESP_MASK);	/* 0x71 */
+	cs8409_vendor_coef_set(codec, CS8409_ASP_UNS_RESP_MASK, coef | 0x800f);
+	snd_hda_codec_write(codec, CS8409_PIN_VENDOR_WIDGET, 0,
+			    CS8409_VENDOR_VERB_TDM_COMMIT, CS8409_TDM_COMMIT_VAL);
+
+	/* Assert the electret mic bias. */
+	cs8409_cs42l83_headset_bias(codec, true);
+
+	/* Input (= ADC output) sample rate, 44.1kHz (_setSampleRate). */
+	cs8409_i2c_write(cs42l83, CS42L42_SRC_SDOUT_FS, CS42L83_SRC_SDOUT_FS_44K1);
+	cs8409_i2c_write(cs42l83, CS42L42_SP_TX_FS, CS42L83_SP_TX_FS_44K1);
+	cs8409_i2c_write(cs42l83, CS42L42_OUT_ASRC_CLK, 0x00);	/* output ASRC clock = 6MHz */
+	reg = cs8409_i2c_read(cs42l83, CS42L42_FS_RATE_EN);
+	cs8409_i2c_write(cs42l83, CS42L42_FS_RATE_EN, reg | CS42L42_FS_EN_OASRC_96K);
+
+	/* ASP transmit slot map (_setupAudioInput). */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_CH_AP_RES, 0x0a);	/* 0x2903 */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_CH1_BIT_LSB, 0x00);	/* 0x2905 */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_CH2_BIT_LSB, 0x20);	/* 0x290b */
+
+	/* Enable ASP transmit (channels 1+2). */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_CH_EN, 0x03);		/* 0x2902 */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_SZ_EN, 0x01);		/* 0x2901 */
+
+	/* Power up the full path to the macOS PWR_CTL1=0x12 state. The mic's output
+	 * SRC (OASRC, ADC -> ASP TX) only locks when the OUTPUT side (mixer + ASP
+	 * in) is powered, so powering only the input side leaves it unlocked and the
+	 * capture silent unless HP playback happened to power the output path. Walk
+	 * it in two stages like the macOS sequence: output side first (clear ASP_DAI
+	 * + MIXER + codec, wait OUT lock, clear HP), then input side (clear ASP_DAO,
+	 * wait IN lock, clear ADC).
+	 */
+	reg = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, reg &
+			 ~(CS42L42_ASP_DAI_PDN_MASK | CS42L42_MIXER_PDN_MASK | CS42L42_PDN_ALL_MASK));
+	for (i = 0; i < CS42L83_PWR_GOOD_POLL_MAX; i++) {
+		if (cs8409_i2c_read(cs42l83, CS42L42_SRCPL_INT_STATUS) & CS42L83_SRCPL_OUT_LOCK)
+			break;
+		usleep_range(CS42L83_PWR_GOOD_POLL_US, CS42L83_PWR_GOOD_POLL_US + 500);
+	}
+	reg = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, reg & ~CS42L42_HP_PDN_MASK);
+
+	reg = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, reg &
+			 ~(CS42L42_ASP_DAO_PDN_MASK | CS42L42_PDN_ALL_MASK));
+	for (i = 0; i < CS42L83_PWR_GOOD_POLL_MAX; i++) {
+		if (cs8409_i2c_read(cs42l83, CS42L42_SRCPL_INT_STATUS) & CS42L83_SRCPL_IN_LOCK)
+			break;
+		usleep_range(CS42L83_PWR_GOOD_POLL_US, CS42L83_PWR_GOOD_POLL_US + 500);
+	}
+	reg = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, reg & ~CS42L42_ADC_PDN_MASK);
+
+	/* Apply the +20dB ADC digital boost so a boom mic at the mouth reaches a
+	 * usable level. The capture volume itself is left to the "Mic Capture
+	 * Volume" (ADC_VOLUME) control — we deliberately do NOT write ADC_VOLUME
+	 * here, since doing so on every capture clobbered the user's setting.
+	 */
+	reg = cs8409_i2c_read(cs42l83, CS42L42_ADC_CTL);
+	cs8409_i2c_write(cs42l83, CS42L42_ADC_CTL, reg | CS42L83_ADC_DIG_BOOST);
+
+	/* Diagnostics (enable with dynamic debug): ADC/ASP-TX powered, bias on,
+	 * SRC locked (SRCPL bit0 IN + bit2 OUT), boost on, RX bus clocking.
+	 */
+	codec_dbg(codec,
+		  "headset mic enable: PWR_CTL1=0x%02x MISC_DET=0x%02x SRCPL=0x%02x ADC_CTL=0x%02x ADC_VOL=0x%02x TX_SZ/CH=0x%02x/0x%02x RX_SCLK=0x%04x\n",
+		   cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1),
+		   cs8409_i2c_read(cs42l83, CS42L42_MISC_DET_CTL),
+		   cs8409_i2c_read(cs42l83, CS42L42_SRCPL_INT_STATUS),
+		   cs8409_i2c_read(cs42l83, CS42L42_ADC_CTL),
+		   cs8409_i2c_read(cs42l83, CS42L42_ADC_VOLUME),
+		   cs8409_i2c_read(cs42l83, CS42L42_ASP_TX_SZ_EN),
+		   cs8409_i2c_read(cs42l83, CS42L42_ASP_TX_CH_EN),
+		   cs8409_vendor_coef_get(codec, CS8409_ASP2_RX_SCLK_COUNT));
+}
+
+/* Reverse of cs8409_cs42l83_headset_mic_enable: mute and power down the CS42L83
+ * input path only, leaving HP output bits and the CS8409 ASP2 RX config in place.
+ */
+static void cs8409_cs42l83_headset_mic_disable(struct hda_codec *codec)
+{
+	struct cs8409_spec *spec = codec->spec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+	unsigned int reg;
+
+	/* Power off codec input: set ADC_PDN then ASP_DAO; leave PDN_ALL/codec and
+	 * HP bits as they were so HP keeps working. Powering the ADC down silences
+	 * capture, so we don't touch ADC_VOLUME (it stays at the user's setting).
+	 * Mic bias is handled separately by cs8409_cs42l83_headset_bias.
+	 */
+	reg = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, reg | CS42L42_ADC_PDN_MASK);
+	reg = cs8409_i2c_read(cs42l83, CS42L42_PWR_CTL1);
+	cs8409_i2c_write(cs42l83, CS42L42_PWR_CTL1, reg | CS42L42_ASP_DAO_PDN_MASK);
+
+	/* Disable ASP transmit. */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_SZ_EN, 0x00);		/* 0x2901 */
+	cs8409_i2c_write(cs42l83, CS42L42_ASP_TX_CH_EN, 0x00);		/* 0x2902 */
+}
+
+/* Capture-source-change hook. The generic parser calls this when the input mux
+ * switches (e.g. PipeWire selecting the headset mic on jack replug) — the one
+ * reliable signal we get for that, since it does NOT issue a PCM PREPARE. Re-arm
+ * the headset-mic path here while the jack is present (the ASP2 clock is live
+ * during the active capture, so the CS8409 RX re-locks).
+ */
+static void cs8409_cs42l83_cap_sync_hook(struct hda_codec *codec,
+					 struct snd_kcontrol *kcontrol,
+					 struct snd_ctl_elem_value *ucontrol)
+{
+	struct cs8409_spec *spec = codec->spec;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+
+	codec_dbg(codec, "cap_sync_hook hp_jack_in=%d\n", cs42l83->hp_jack_in);
+	if (cs42l83->hp_jack_in)
+		cs8409_cs42l83_headset_mic_enable(codec);
+}
+
+/* Apple capture hook. The internal DMIC is permanently clocked (hw_init), so it
+ * needs nothing here. The headset-mic path is (re)armed at capture PREPARE while
+ * the jack is present — this covers cold boot and fresh captures; the
+ * cap_sync_hook covers input switches (replug) where no PREPARE is issued.
  */
 static void cs42l83_capture_pcm_hook(struct hda_pcm_stream *hinfo,
 				     struct hda_codec *codec,
@@ -1638,22 +1839,21 @@ static void cs42l83_capture_pcm_hook(struct hda_pcm_stream *hinfo,
 				     int action)
 {
 	struct cs8409_spec *spec = codec->spec;
-	unsigned int coef;
+	struct sub_codec *cs42l83 = spec->scodecs[CS8409_CODEC0];
+	struct hda_gen_spec *gen = &spec->gen;
+	unsigned int item = gen->cur_mux[0];
+	hda_nid_t sel_pin = (item < gen->input_mux.num_items) ? gen->imux_pins[item] : 0;
 
-	switch (action) {
-	case HDA_GEN_PCM_ACT_PREPARE:
+	if (action == HDA_GEN_PCM_ACT_PREPARE) {
 		spec->capture_started = 1;
-		coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
-		cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef | 0x0002);
-		break;
-	case HDA_GEN_PCM_ACT_CLEANUP:
+		if (cs42l83->hp_jack_in)
+			cs8409_cs42l83_headset_mic_enable(codec);
+	} else if (action == HDA_GEN_PCM_ACT_CLEANUP) {
 		spec->capture_started = 0;
-		coef = cs8409_vendor_coef_get(codec, CS8409_PAD_CFG_SLW_RATE_CTRL);
-		cs8409_vendor_coef_set(codec, CS8409_PAD_CFG_SLW_RATE_CTRL, coef & ~0x0002);
-		break;
-	default:
-		break;
 	}
+
+	codec_dbg(codec, "capture hook: action=%d nid=0x%x item=%u sel_pin=0x%x hp_jack_in=%d\n",
+		  action, hinfo->nid, item, sel_pin, cs42l83->hp_jack_in);
 }
 
 void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action)
@@ -1718,12 +1918,18 @@ void cs8409_cs42l83_fixups(struct hda_codec *codec, const struct hda_fixup *fix,
 		spec->scodecs[CS8409_CODEC0]->hp_jack_in = 0;
 		break;
 	case HDA_FIXUP_ACT_PROBE:
-		/* Fix Sample Rate to 44.1kHz */
+		/* Fix the sample rate to 44.1kHz (like the Dell machines fix
+		 * theirs to 48kHz). The ASP2 clock dividers and the CS42L83 SRC
+		 * sample-rate values used here are the macOS bring-up values,
+		 * which are calibrated for 44.1kHz; other rates would need a
+		 * second verified set of divider/SRC values.
+		 */
 		spec->gen.stream_analog_playback = &cs42l83_44k1_pcm_analog_playback;
 		spec->gen.stream_analog_capture = &cs42l83_44k1_pcm_analog_capture;
 		/* add hooks */
 		spec->gen.pcm_playback_hook = cs42l83_playback_pcm_hook;
 		spec->gen.pcm_capture_hook = cs42l83_capture_pcm_hook;
+		spec->gen.cap_sync_hook = cs8409_cs42l83_cap_sync_hook;
 		snd_hda_gen_add_kctl(&spec->gen, "Headphone Playback Volume",
 				&cs42l42_dac_volume_mixer);
 		snd_hda_gen_add_kctl(&spec->gen, "Mic Capture Volume",

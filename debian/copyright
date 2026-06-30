@@ -1,0 +1,51 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: snd-hda-codec-cs8409-imac
+Source: https://github.com/petershevchenko/imac-sound
+Comment:
+ Apple iMac18,3 (CS42L83 / TAS5764) support for the in-kernel Cirrus Logic
+ CS8409 HDA codec driver. Based on the mainline Linux CS8409 driver; the
+ CS42L83 / TAS5764 register sequences were derived from the macOS AppleHDA
+ driver via the GPL-2.0 out-of-tree project
+ https://github.com/egorenar/snd-hda-codec-cs8409 .
+
+Files: *
+Copyright: 2021 Cirrus Logic, Inc. and
+                Cirrus Logic International Semiconductor Ltd.
+           2024-2026 Peter Shev <peter@shev.it>
+License: GPL-2.0-or-later
+
+Files: codecs/cirrus/cs8409-tables.c
+Copyright: 2021 Cirrus Logic, Inc. and
+                Cirrus Logic International Semiconductor Ltd.
+           2024-2026 Peter Shev <peter@shev.it>
+License: GPL-2.0
+Comment: This file carries an SPDX-License-Identifier of GPL-2.0-only.
+
+Files: tools/*
+Copyright: 2026 Peter Shev <peter@shev.it>
+License: GPL-2.0-or-later
+
+License: GPL-2.0-or-later
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".
+
+License: GPL-2.0
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; version 2 of the License.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".

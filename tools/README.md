@@ -1,7 +1,18 @@
 # tools
 
-Debugging helpers used while developing the iMac CS8409/CS42L83 driver. They are
-general-purpose (plain ALSA/PipeWire), not specific to this codec.
+Helper scripts for the iMac CS8409/CS42L83 driver. All are read-only.
+
+## check-compatible.sh
+
+Checks whether this machine is supported by the package — the Mac model (must be
+`iMac18,3`) and the audio codec (Cirrus `CS8409` with subsystem id `0x106b1000`).
+Prints a clear `COMPATIBLE` / not-a-match verdict and exits 0 / 1 accordingly.
+
+```sh
+./check-compatible.sh
+```
+
+The rest are general-purpose ALSA/PipeWire helpers, not specific to this codec:
 
 ## audio-state.sh
 

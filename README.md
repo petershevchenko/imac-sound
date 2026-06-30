@@ -53,8 +53,8 @@ sudo apt install -y dkms build-essential devscripts debhelper dh-dkms \
 **2. Get this project** (skip if you already have the folder), and enter it:
 
 ```sh
-git clone https://github.com/<your-fork>/snd-hda-codec-cs8409-imac.git
-cd snd-hda-codec-cs8409-imac
+git clone https://github.com/petershevchenko/imac-sound.git
+cd imac-sound
 ```
 
 **3. Check your Mac is supported:**
